@@ -76,6 +76,7 @@ export default function MapPreview({ mapUrl, mapLabel, onClose }) {
                     <iframe
                         src={embedUrl}
                         title={mapLabel || 'Map Preview'}
+                        sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
                         style={{
                             width: '100%',
                             height: '100%',
