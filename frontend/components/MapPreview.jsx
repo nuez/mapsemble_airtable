@@ -1,19 +1,35 @@
-import React, { useEffect, useState } from 'react';
-import { useViewport, Box, Text, Button, Link } from '@airtable/blocks/ui';
+import React, { useEffect, useRef, useState } from 'react';
+import { useViewport, Box, Text, Button } from '@airtable/blocks/ui';
+import { MAPSEMBLE_URL } from '../services/mapsemble';
 
-export default function MapPreview({ mapUrl, mapLabel, onClose }) {
+export default function MapPreview({ mapId, mapLabel, onClose }) {
     const viewport = useViewport();
     const [iframeError, setIframeError] = useState(false);
-    const embedUrl = `${mapUrl}/embed`;
+    const wasFullscreen = useRef(false);
+    const embedUrl = `${MAPSEMBLE_URL}/embed/${mapId}`;
+    const mapUrl = `${MAPSEMBLE_URL}/map/${mapId}`;
 
     useEffect(() => {
         viewport.enterFullscreenIfPossible();
-        return () => {
-            if (viewport.isFullscreen) {
-                viewport.exitFullscreen();
-            }
-        };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Auto-close when fullscreen is exited externally (e.g. Airtable's native X)
+    useEffect(() => {
+        if (viewport.isFullscreen) {
+            wasFullscreen.current = true;
+        } else if (wasFullscreen.current) {
+            wasFullscreen.current = false;
+            onClose();
+        }
+    }, [viewport.isFullscreen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    function handleClose() {
+        if (viewport.isFullscreen) {
+            viewport.exitFullscreen();
+        } else {
+            onClose();
+        }
+    }
 
     return (
         <Box
@@ -40,19 +56,20 @@ export default function MapPreview({ mapUrl, mapLabel, onClose }) {
                     {mapLabel || 'Map Preview'}
                 </Text>
                 <Box display="flex" alignItems="center" className="gap-2 shrink-0 ml-2">
-                    <Link
-                        href={mapUrl}
-                        target="_blank"
-                        rel="noreferrer"
+                    <Button
+                        onClick={() => window.open(mapUrl, '_blank', 'noreferrer')}
+                        variant="default"
                         size="small"
                     >
-                        Open in Mapsemble
-                    </Link>
-                    <Button onClick={onClose} variant="default" size="small">
+                        Customize in Mapsemble
+                    </Button>
+                    <Button onClick={handleClose} variant="default" size="small">
                         Close
                     </Button>
                 </Box>
             </Box>
+
+
 
             {/* Iframe body */}
             <Box flex="auto" padding={0} style={{ position: 'relative' }}>
@@ -68,9 +85,13 @@ export default function MapPreview({ mapUrl, mapLabel, onClose }) {
                         <Text size="large" className="text-gray-500 mb-2">
                             Preview unavailable
                         </Text>
-                        <Link href={mapUrl} target="_blank" rel="noreferrer">
+                        <Button
+                            onClick={() => window.open(mapUrl, '_blank', 'noreferrer')}
+                            variant="default"
+                            size="small"
+                        >
                             Open in Mapsemble instead
-                        </Link>
+                        </Button>
                     </Box>
                 ) : (
                     <iframe

@@ -1,0 +1,12 @@
+{
+    "version": "1.0",
+    "bundler": {
+        "module": "./bundler.js"
+    },
+    "frontendEntry": "./frontend/index.js",
+    "allowedDomains": [
+        "https://mapsemble.ddev.site",
+        "https://mapsemble.com",
+        "https://api.airtable.com"
+    ]
+}

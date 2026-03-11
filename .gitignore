@@ -1,0 +1,7 @@
+/node_modules
+/.airtableblocksrc.json
+/build
+/frontend/tailwind.css
+.env
+.idea
+.tmp
