@@ -142,7 +142,7 @@ export function parseCoordinatePair(str) {
 
 /**
  * Parses a value to a GeoJSON geometry based on the specified format.
- * Does NOT handle 'auto' — caller must call detectFormat first.
+ * Does NOT handle 'auto' - caller must call detectFormat first.
  * @param {string} value
  * @param {'geojson' | 'wkt' | 'coordinate_pair' | 'address'} format
  * @returns {object | null}

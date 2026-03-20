@@ -60,7 +60,7 @@ export default function WebhookPanel({ map, tableId, pat, onRegister, onClose })
             {/* Header */}
             <Box marginBottom={3}>
                 <Text fontWeight="strong" size="default">
-                    Webhook — {map?.mapLabel || map?.mapId || 'Map'}
+                    Webhook - {map?.mapLabel || map?.mapId || 'Map'}
                 </Text>
             </Box>
 
@@ -77,7 +77,7 @@ export default function WebhookPanel({ map, tableId, pat, onRegister, onClose })
                         }}
                     >
                         <Text size="small" style={{ color: '#92400e' }}>
-                            No Airtable PAT configured — go to Settings to add one.
+                            No Airtable PAT configured - go to Settings to add one.
                         </Text>
                     </Box>
                     <Button onClick={onClose} variant="default" size="small">
@@ -147,7 +147,7 @@ export default function WebhookPanel({ map, tableId, pat, onRegister, onClose })
                                 {checkResult.ok && registeredUrl && (
                                     <Text size="small" textColor="light" marginTop={1}>
                                         {registeredUrl === 'NOT_FOUND'
-                                            ? '⚠ Webhook ID not found on Airtable — re-register.'
+                                            ? '⚠ Webhook ID not found on Airtable - re-register.'
                                             : `Registered URL: ${registeredUrl}`}
                                     </Text>
                                 )}

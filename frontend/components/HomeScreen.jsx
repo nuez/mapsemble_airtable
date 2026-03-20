@@ -6,10 +6,24 @@ import {
   Box,
   Text,
   Button,
-  Link,
 } from '@airtable/blocks/ui';
-import { fetchMaps } from '../services/mapsemble';
+import { fetchMaps, MAPSEMBLE_URL } from '../services/mapsemble';
 import heroImage from '../assets/hero.js';
+
+function BtnSpinner() {
+  return (
+    <span style={{
+      display: 'inline-block',
+      width: 10,
+      height: 10,
+      borderRadius: '50%',
+      border: '1.5px solid currentColor',
+      borderTopColor: 'transparent',
+      animation: 'mapsemble-spin 0.6s linear infinite',
+      flexShrink: 0,
+    }} />
+  );
+}
 
 function formatDate(iso) {
   if (!iso) {
@@ -26,6 +40,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
   const base = useBase();
   const cursor = useCursor();
   const globalConfig = useGlobalConfig();
+  const canWrite = globalConfig.hasPermissionToSet();
 
   const connected = !!globalConfig.get('token');
   const activeTableId = cursor.activeTableId;
@@ -36,7 +51,9 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
   const activeTable = activeTableId ? base.getTableByIdIfExists(activeTableId) : null;
 
   const [missingMapIds, setMissingMapIds] = useState(new Set());
+  const [loadingMaps, setLoadingMaps] = useState(false);
   const [showExample, setShowExample] = useState(false);
+  const [loadingBtn, setLoadingBtn] = useState(null);
 
   const mapIds = maps.map((m) => m.mapId).join(',');
   useEffect(() => {
@@ -54,15 +71,18 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
       clientSecret: globalConfig.get('clientSecret'),
       token,
     };
+    setLoadingMaps(true);
     fetchMaps(config, (newToken) => globalConfig.setAsync('token', newToken))
       .then((remoteMaps) => {
         const remoteIds = new Set(remoteMaps.map((m) => String(m.id)));
         setMissingMapIds(
           new Set(maps.filter((m) => !remoteIds.has(String(m.mapId))).map((m) => m.mapId)),
         );
+        setLoadingMaps(false);
       })
       .catch(() => {
         setMissingMapIds(new Set());
+        setLoadingMaps(false);
       });
   }, [activeTableId, mapIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -85,7 +105,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
           className="bg-yellow-50 border border-yellow-300 rounded-md"
         >
           <Text size="small" className="text-amber-800">
-            Column mapping updated — sync to apply changes.
+            Column mapping updated - sync to apply changes.
           </Text>
           <Button
             onClick={onDismissResyncNotice}
@@ -105,38 +125,25 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
             className={'mb-5'}
           >
             <Text size="large" fontWeight="strong" className="text-gray-700 !mb-2">
-              Turn your Airtable records into interactive maps
+              Visualize your Airtable data on a map, instantly.
             </Text>
             <Text size="default" className="text-gray-500 !mt-3">
-              Turn your Airtable records into interactive maps. Connect a table
-              with location data, create a map, and sync your records to see
-              them as markers — all without leaving Airtable.
+              Connect any table with location data, drop your records as map
+              markers, and keep everything in sync - without leaving Airtable.
+              Customize marker icons, popup cards, colors, and more to make
+              each map your own.
             </Text>
           </Box>
 
-          <Box marginBottom={3} className="rounded-md overflow-hidden">
-            <img
-              src={heroImage}
-              alt="Mapsemble map example"
-              style={{ width: '100%', display: 'block', borderRadius: 6 }}
-            />
-          </Box>
 
-          <Box
-            padding={3}
-            marginBottom={3}
-            className="bg-gray-50 border border-gray-200 rounded-md"
-          >
-
-            <Text className="text-gray-400 my-3 text-center">
-              {connected
-                ? `No maps for ${activeTable ? activeTable.name : 'this table'} yet. Create your first one below.`
-                : 'Connect to Mapsemble to get started.'}
-            </Text>
-          </Box>
         </Box>
       ) : (
         <Box marginBottom={3}>
+          {loadingMaps && (
+            <Box display="flex" alignItems="center" marginBottom={2}>
+              <Text size="small" textColor="light">Checking maps...</Text>
+            </Box>
+          )}
           {maps.map((map) => (
             <Box
               key={map.mapId}
@@ -144,11 +151,11 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
               marginBottom={2}
               className="bg-white border border-gray-200 rounded-md"
             >
-              <Box display="flex" alignItems="flex-start"
+              <Box display="flex" alignItems="center"
                    justifyContent="space-between">
                 <Box flex="1" className="min-w-0 mr-2">
                   <Text
-                    size="small"
+                    size="default"
                     fontWeight="strong"
                     className="truncate"
                   >
@@ -162,6 +169,18 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                     <Text size="small" className="text-gray-400 mt-0.5">
                       Never synced
                     </Text>
+                  )}
+                  {map.limitReached && (
+                    <Box
+                      display="inline-flex"
+                      alignItems="center"
+                      marginTop={1}
+                      className="bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5"
+                    >
+                      <Text size="small" className="text-amber-800">
+                        Location limit reached
+                      </Text>
+                    </Box>
                   )}
                   {tableConfig.airtableWebhookId && globalConfig.get('airtablePat') ? (
                     <Box
@@ -194,14 +213,6 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                       </Text>
                     </Box>
                   )}
-                  {map.mapUrl && (
-                    <Box marginTop={1}>
-                      <Link href={map.mapUrl} target="_blank" rel="noreferrer"
-                            size="small">
-                        Open in Mapsemble
-                      </Link>
-                    </Box>
-                  )}
                 </Box>
                 <Box display="flex" className="gap-1.5 shrink-0">
                   <Button
@@ -213,20 +224,40 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                     Preview
                   </Button>
                   <Button
-                    onClick={() => onModify(activeTableId, map.mapId)}
+                    onClick={() => { setLoadingBtn({ mapId: map.mapId, action: 'modify' }); onModify(activeTableId, map.mapId); }}
                     variant="default"
                     size="small"
-                    disabled={missingMapIds.has(map.mapId)}
+                    disabled={!canWrite || missingMapIds.has(map.mapId)}
                   >
-                    Modify
+                    <Box display="flex" alignItems="center" style={{ gap: 4 }}>
+                      {loadingBtn?.mapId === map.mapId && loadingBtn?.action === 'modify' && <BtnSpinner />}
+                      Modify
+                    </Box>
                   </Button>
                   <Button
-                    onClick={() => onSync(activeTableId, map.mapId)}
+                    onClick={() => { setLoadingBtn({ mapId: map.mapId, action: 'sync' }); onSync(activeTableId, map.mapId); }}
+                    variant="default"
+                    size="small"
+                    disabled={!canWrite || missingMapIds.has(map.mapId)}
+                  >
+                    <Box display="flex" alignItems="center" style={{ gap: 4 }}>
+                      {loadingBtn?.mapId === map.mapId && loadingBtn?.action === 'sync' && <BtnSpinner />}
+                      Sync
+                    </Box>
+                  </Button>
+                  <Button
+                    onClick={() => window.open(`${MAPSEMBLE_URL}/map/${map.mapId}`, '_blank', 'noreferrer')}
                     variant="primary"
                     size="small"
                     disabled={missingMapIds.has(map.mapId)}
                   >
-                    Sync
+                    <Box display="flex" alignItems="center" className="gap-1">
+                      Customize
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M7 17L17 7"/>
+                        <path d="M7 7h10v10"/>
+                      </svg>
+                    </Box>
                   </Button>
                 </Box>
               </Box>
@@ -245,6 +276,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                     variant="danger"
                     size="small"
                     marginTop={2}
+                    disabled={!canWrite}
                   >
                     Remove from list
                   </Button>
@@ -262,6 +294,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
             onClick={() => onCreateNew(activeTableId)}
             variant="primary"
             className="flex-1"
+            disabled={!canWrite}
           >
             + Create a new map
           </Button>
@@ -291,6 +324,17 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
           </Button>
         )}
       </Box>
+
+      {/* Hero image - shown below buttons when not connected */}
+      {!connected && maps.length === 0 && (
+        <Box marginTop={3} className="rounded-md overflow-hidden">
+          <img
+            src={heroImage}
+            alt="Mapsemble map example"
+            style={{ width: '100%', display: 'block', borderRadius: 6 }}
+          />
+        </Box>
+      )}
 
       {/* Example map modal */}
       {showExample && (
@@ -336,6 +380,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
           </Box>
         </Box>
       )}
+      <style>{`@keyframes mapsemble-spin { to { transform: rotate(360deg); } }`}</style>
     </Box>
   );
 }

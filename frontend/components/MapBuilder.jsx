@@ -10,19 +10,36 @@ import {
     FormField,
     Input,
 } from '@airtable/blocks/ui';
-import { createMap, putFeatures, syncFeatures, updateMap, MAPSEMBLE_URL, NGROK_URL } from '../services/mapsemble';
-import { recordToFeature, buildSlugMap } from '../services/geojson';
+import { createMap, updateMap, MAPSEMBLE_URL, NGROK_URL } from '../services/mapsemble';
+import { buildSlugMap, toSlug } from '../services/geojson';
 import { registerAirtableWebhook } from '../services/airtable';
 
 function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, onBack }) {
     const globalConfig = useGlobalConfig();
+    const canWrite = globalConfig.hasPermissionToSet();
 
-    const records = useRecords(table, { fields: table.fields.map(f => f.id) });
+    const neededFieldIds = (() => {
+        const cfg = pendingConfig || (globalConfig.get(['tableConfigs', tableId]) || {});
+        const fm = cfg.fieldMapping || {};
+        const ids = new Set(
+            Object.entries(fm)
+                .filter(([, meta]) => meta.remoteType)
+                .map(([id]) => id)
+        );
+        if (cfg.latField) ids.add(cfg.latField);
+        if (cfg.lngField) ids.add(cfg.lngField);
+        if (cfg.locationColumn) ids.add(cfg.locationColumn);
+        if (cfg.labelField) ids.add(cfg.labelField);
+        return [...ids].filter(id => table.getFieldByIdIfExists(id));
+    })();
+    const records = useRecords(table, { fields: neededFieldIds });
 
     const [mapName, setMapName] = useState(table.name);
     const [building, setBuilding] = useState(false);
-    const [buildStep, setBuildStep] = useState(''); // 'creating' | 'syncing' | 'generating'
+    const [buildStep, setBuildStep] = useState(''); // 'creating' | 'generating'
     const [error, setError] = useState('');
+    const [webhookWarning, setWebhookWarning] = useState('');
+    const [deletedFields, setDeletedFields] = useState([]);
 
     function getConfig() {
         return {
@@ -35,33 +52,46 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
 
     function resolveFieldNames(rawFields) {
         const fields = {};
+        const missing = [];
         for (const [fieldId, meta] of Object.entries(rawFields)) {
             const liveField = table.getFieldByIdIfExists(fieldId);
+            if (!liveField) {
+                missing.push(meta.name || fieldId);
+            }
             fields[fieldId] = { ...meta, name: liveField ? liveField.name : (meta.name || fieldId) };
         }
+        if (missing.length > 0) setDeletedFields(missing);
         return fields;
     }
 
     function getFieldMapping() {
         if (pendingConfig) {
+            const locationColumnName = pendingConfig.locationColumn
+                ? (table.getFieldByIdIfExists(pendingConfig.locationColumn)?.name || '')
+                : '';
             return {
                 locationMode:   pendingConfig.locationMode || 'dual',
                 latField:       pendingConfig.latField,
                 lngField:       pendingConfig.lngField,
                 locationColumn: pendingConfig.locationColumn,
                 locationFormat: pendingConfig.locationFormat || 'auto',
+                locationColumnName,
                 fields:         resolveFieldNames(pendingConfig.fieldMapping || {}),
                 labelField:     pendingConfig.labelField || null,
             };
         }
         // fallback: read from globalConfig
         const tc = globalConfig.get(['tableConfigs', tableId]) || {};
+        const locationColumnName = tc.locationColumn
+            ? (table.getFieldByIdIfExists(tc.locationColumn)?.name || '')
+            : '';
         return {
             locationMode:   tc.locationMode || 'dual',
             latField:       tc.latField,
             lngField:       tc.lngField,
             locationColumn: tc.locationColumn,
             locationFormat: tc.locationFormat || 'auto',
+            locationColumnName,
             fields:         resolveFieldNames(tc.fieldMapping || {}),
             labelField:     tc.labelField || null,
         };
@@ -108,13 +138,28 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                 required: false,
             });
 
+            // Add geocode field to schema when using address format
+            if (fieldMapping.locationFormat === 'address' && fieldMapping.locationColumn) {
+                const colName = table.getFieldByIdIfExists(fieldMapping.locationColumn)?.name || 'Address';
+                fields.push({
+                    slug: toSlug(colName),
+                    type: 'text',
+                    label: colName,
+                    weight: fields.length,
+                    required: false,
+                });
+            }
+
             // --- Step 1: Create map with fields only (no features, no AI) ---
             setBuildStep('creating');
+            const geocodeField = fieldMapping.locationFormat === 'address' && fieldMapping.locationColumn
+                ? toSlug(table.getFieldByIdIfExists(fieldMapping.locationColumn)?.name || 'Address')
+                : '';
             const payload = {
                 label: mapName,
                 published: true,
                 externalSource: 'airtable',
-                config: { debug: false, remoteField: '_airtable_id' },
+                config: { debug: false, remoteField: '_airtable_id', ...(geocodeField ? { geocodeField } : {}) },
                 dataSource: {
                     type: 'airtable',
                     label: 'Data layer',
@@ -154,25 +199,7 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
 
             const map = await createMap(payload, cfg, setToken);
 
-            // --- Step 2: Sync all records as features ---
-            setBuildStep('syncing');
-            const allFeatures = records
-                .map(r => recordToFeature(r, fieldMapping))
-                .filter(f => f !== null && f !== undefined);
-
-            if (allFeatures.length > 0) {
-                if (allFeatures.length <= 1000) {
-                    await putFeatures(map.id, allFeatures, cfg, setToken);
-                } else {
-                    // Batch in chunks of 1000 via POST (additive sync)
-                    for (let i = 0; i < allFeatures.length; i += 1000) {
-                        const batch = allFeatures.slice(i, i + 1000);
-                        await syncFeatures(map.id, batch, cfg, setToken);
-                    }
-                }
-            }
-
-            // --- Step 3: Generate AI templates ---
+            // --- Step 2: Generate AI templates ---
             setBuildStep('generating');
             await updateMap(map.id, {
                 config: { generateTemplates: true },
@@ -181,7 +208,7 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             // Attempt automatic webhook registration if a PAT is configured
             const pat = globalConfig.get('airtablePat');
             const existingConfig = globalConfig.get(['tableConfigs', tableId]) || {};
-            // One webhook per table — check if one already exists before creating another
+            // One webhook per table - check if one already exists before creating another
             const existingTableWebhookId = existingConfig.airtableWebhookId || null;
             let airtableWebhookId = existingTableWebhookId;
 
@@ -198,44 +225,43 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                             },
                         },
                     );
-                    if (dsRes.ok) {
-                        const dsData = await dsRes.json();
-                        const rawNotificationUrl = dsData.notificationUrl;
-                        const notificationUrl = NGROK_URL
-                            ? rawNotificationUrl.replace(
-                                new URL(MAPSEMBLE_URL).origin,
-                                NGROK_URL.replace(/\/$/, ''),
-                              )
-                            : rawNotificationUrl;
+                    if (!dsRes.ok) {
+                        throw new Error(`webhook-endpoint-not-found:${dsRes.status}`);
+                    }
+                    const dsData = await dsRes.json();
+                    const rawNotificationUrl = dsData.notificationUrl;
+                    const notificationUrl = NGROK_URL
+                        ? rawNotificationUrl.replace(
+                            new URL(MAPSEMBLE_URL).origin,
+                            NGROK_URL.replace(/\/$/, ''),
+                          )
+                        : rawNotificationUrl;
 
-                        if (!existingTableWebhookId) {
-                            // 2. No existing table webhook — register a new one with Airtable
-                            airtableWebhookId = await registerAirtableWebhook(baseId, tableId, notificationUrl, pat);
-                        }
+                    if (!existingTableWebhookId) {
+                        // 2. No existing table webhook - register a new one with Airtable
+                        airtableWebhookId = await registerAirtableWebhook(baseId, tableId, notificationUrl, pat);
+                    }
 
-                        // 3. Register this map <-> webhook with the Mapsemble backend
-                        const registerRes = await fetch(`${MAPSEMBLE_URL}/api/v1/webhook/airtable/register`, {
-                            method: 'POST',
-                            headers: {
-                                Authorization: `Bearer ${globalConfig.get('token')}`,
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                mapId: map.id,
-                                baseId,
-                                tableId,
-                                webhookId: airtableWebhookId,
-                                pat,
-                            }),
-                        });
-                        if (!registerRes.ok) {
-                            throw new Error(`Mapsemble webhook registration failed (${registerRes.status})`);
-                        }
+                    // 3. Register this map <-> webhook with the Mapsemble backend
+                    const registerRes = await fetch(`${MAPSEMBLE_URL}/api/v1/webhook/airtable/register`, {
+                        method: 'POST',
+                        headers: {
+                            Authorization: `Bearer ${globalConfig.get('token')}`,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            mapId: map.id,
+                            baseId,
+                            tableId,
+                            webhookId: airtableWebhookId,
+                            pat,
+                        }),
+                    });
+                    if (!registerRes.ok) {
+                        throw new Error(`Mapsemble webhook registration failed (${registerRes.status})`);
                     }
                 } catch (webhookErr) {
-                    // Non-fatal — map was created successfully, auto-sync just won't work
-                    // eslint-disable-next-line no-console
-                    console.warn('[Mapsemble] Webhook registration failed:', webhookErr.message);
+                    setWebhookWarning('Auto-sync could not be enabled. You can set it up later from the sync panel.');
                 }
             }
 
@@ -264,7 +290,6 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
 
     if (building) {
         const stepLabel = buildStep === 'creating' ? 'Creating map...'
-            : buildStep === 'syncing' ? 'Syncing records...'
             : buildStep === 'generating' ? 'Generating templates...'
             : 'Working...';
 
@@ -299,6 +324,22 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
 
     return (
         <Box padding={3}>
+            {deletedFields.length > 0 && (
+                <Box padding={2} marginBottom={2} className="bg-red-50 border border-red-200 rounded-md">
+                    <Text size="small" className="text-red-700" marginBottom={1}>
+                        Some mapped fields were deleted: {deletedFields.join(', ')}
+                    </Text>
+                    <Text size="small" className="text-red-600">
+                        Please update your field mapping before creating the map.
+                    </Text>
+                    {onBack && (
+                        <Button onClick={onBack} variant="default" size="small" marginTop={1}>
+                            ← Update field mapping
+                        </Button>
+                    )}
+                </Box>
+            )}
+
             <Heading size="small" marginBottom={3}>Build Map</Heading>
 
             <Text size="small" textColor="light" marginBottom={3}>
@@ -316,6 +357,12 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                 {records.length} record{records.length !== 1 ? 's' : ''} available
             </Text>
 
+            {webhookWarning && (
+                <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                    <Text size="small" className="text-amber-700">{webhookWarning}</Text>
+                </Box>
+            )}
+
             {error && (
                 <Box
                     padding={2}
@@ -323,6 +370,14 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                     className="bg-red-50 border border-red-200 rounded"
                 >
                     <Text size="small" className="text-red-700">{error}</Text>
+                </Box>
+            )}
+
+            {!canWrite && (
+                <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                    <Text size="small" className="text-amber-700">
+                        Read-only access. You need creator permissions to create maps.
+                    </Text>
                 </Box>
             )}
 
@@ -334,7 +389,7 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                 )}
                 <Button
                     onClick={handleBuild}
-                    disabled={!mapName.trim()}
+                    disabled={!canWrite || !mapName.trim()}
                     variant="primary"
                     flex={onBack ? '2' : undefined}
                     width={onBack ? undefined : '100%'}

@@ -18,6 +18,7 @@ const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap }) {
     const globalConfig = useGlobalConfig();
+    const canWrite = globalConfig.hasPermissionToSet();
     const base = useBase();
 
     const [clientId, setClientId] = useState(globalConfig.get('clientId') || '');
@@ -30,6 +31,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
     const [showManual, setShowManual] = useState(false);
     const [patValidating, setPatValidating] = useState(false);
     const [patErrors, setPatErrors] = useState([]);
+    const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
 
     const pollTimerRef = useRef(null);
     const pollTimeoutRef = useRef(null);
@@ -65,6 +67,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                 (newToken) => globalConfig.setAsync('token', newToken),
             );
 
+            await globalConfig.setAsync('featureFlags', me.featureFlags || []);
             setUserName(me.name || me.email || 'Connected');
             setStatus('ok');
             return token;
@@ -177,6 +180,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
             await globalConfig.setAsync('clientId', newClientId);
             await globalConfig.setAsync('clientSecret', newClientSecret);
             await globalConfig.setAsync('token', token);
+            await globalConfig.setAsync('featureFlags', me.featureFlags || []);
 
             setUserName(me.name || me.email || 'Connected');
             setStatus('ok');
@@ -190,6 +194,14 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
         <Box padding={3} height="100%">
             <Heading size="small" marginBottom={2}>Mapsemble Connection</Heading>
 
+            {!canWrite && (
+                <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                    <Text size="small" className="text-amber-700">
+                        You don't have permission to modify settings. Contact a base collaborator with creator permissions.
+                    </Text>
+                </Box>
+            )}
+
             <Text size="small" textColor="light" marginBottom={3}>
                 Connecting to{' '}
                 <Box as="span" fontFamily="monospace">{MAPSEMBLE_URL}</Box>
@@ -200,7 +212,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                 <Box marginBottom={3}>
                     <Button
                         onClick={handlePopupConnect}
-                        disabled={status === 'polling' || status === 'checking'}
+                        disabled={!canWrite || status === 'polling' || status === 'checking'}
                         variant="primary"
                         width="100%"
                         marginBottom={2}
@@ -257,7 +269,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
 
                     <Button
                         onClick={handleSave}
-                        disabled={status === 'checking' || !clientId || !clientSecret}
+                        disabled={!canWrite || status === 'checking' || !clientId || !clientSecret}
                         variant="primary"
                         width="100%"
                         marginBottom={2}
@@ -283,7 +295,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                 </Box>
             )}
 
-            {/* PAT field — shown in both modes when not connected */}
+            {/* PAT field - shown in both modes when not connected */}
             {status !== 'ok' && (showManual || false) && (
                 <Box marginBottom={3}>
                     <FormField label="Personal Access Token (optional)" marginBottom={1}>
@@ -330,7 +342,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                     </Text>
                     <Text size="small" textColor="light" marginBottom={2}>
                         In the token's <strong>Access</strong> section, add the workspace or
-                        base you want to sync — the token can only access bases explicitly
+                        base you want to sync - the token can only access bases explicitly
                         listed there.
                     </Text>
                     <Text size="small" textColor="light" marginBottom={2}>
@@ -371,7 +383,7 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                                     }
                                     await globalConfig.setAsync('airtablePat', airtablePat || null);
                                 }}
-                                disabled={patValidating || !airtablePat}
+                                disabled={!canWrite || patValidating || !airtablePat}
                                 variant="default"
                             >
                                 {patValidating ? 'Validating...' : 'Save'}
@@ -402,31 +414,6 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                         </Box>
                     )}
 
-                    <Box display="flex" style={{ gap: 8 }}>
-                        {onCreateMap && (
-                            <Box flex="auto">
-                                <Button
-                                    onClick={async () => {
-                                        await globalConfig.setAsync('airtablePat', airtablePat || null);
-                                        onCreateMap();
-                                    }}
-                                    variant="primary"
-                                    width="100%"
-                                >
-                                    Create a map
-                                </Button>
-                            </Box>
-                        )}
-                        <Button
-                            onClick={() => {
-                                if (onDismiss) onDismiss();
-                                else if (onComplete) onComplete();
-                            }}
-                            variant="default"
-                        >
-                            Close
-                        </Button>
-                    </Box>
                 </Box>
             )}
 
@@ -458,22 +445,83 @@ export default function Setup({ onComplete, onDismiss, onDisconnect, onCreateMap
                 </Button>
             )}
 
-            {onDisconnect && (
-                <Button
-                    onClick={async () => {
-                        stopPolling();
-                        await globalConfig.setAsync('token', null);
-                        await globalConfig.setAsync('clientId', null);
-                        await globalConfig.setAsync('clientSecret', null);
-                        await globalConfig.setAsync('airtablePat', null);
-                        onDisconnect();
-                    }}
-                    variant="danger"
-                    width="100%"
-                    marginTop={2}
-                >
-                    Disconnect
-                </Button>
+            {(onDisconnect || status === 'ok') && !confirmingDisconnect && (
+                <Box display="flex" marginTop={2} style={{ gap: 8 }}>
+                    {onDisconnect && (
+                        <Button
+                            onClick={() => setConfirmingDisconnect(true)}
+                            variant="danger"
+                            style={{ flex: '1 1 50%' }}
+                        >
+                            Disconnect
+                        </Button>
+                    )}
+
+                    {status === 'ok' && (
+                        <Button
+                            onClick={() => {
+                                if (onDismiss) onDismiss();
+                                else if (onComplete) onComplete();
+                            }}
+                            variant="primary"
+                            style={{ flex: '1 1 50%' }}
+                        >
+                            Continue
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 4, verticalAlign: 'middle' }}>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                                <polyline points="12 5 19 12 12 19"/>
+                            </svg>
+                        </Button>
+                    )}
+                </Box>
+            )}
+
+            {confirmingDisconnect && (
+                <Box marginTop={2}>
+                    <Box
+                        padding={2}
+                        marginBottom={2}
+                        backgroundColor="#fef2f2"
+                        borderColor="#fecaca"
+                        border="default"
+                        borderRadius="default"
+                    >
+                        <Text size="small">
+                            Are you sure you want to disconnect? Your maps will remain on Mapsemble but will no longer sync from this extension.
+                        </Text>
+                    </Box>
+                    <Box display="flex" style={{ gap: 8 }}>
+                        <Button
+                            onClick={() => setConfirmingDisconnect(false)}
+                            variant="default"
+                            style={{ flex: '1 1 50%' }}
+                        >
+                            Cancel
+                        </Button>
+                        <Button
+                            onClick={async () => {
+                                stopPolling();
+                                await globalConfig.setAsync('token', null);
+                                await globalConfig.setAsync('clientId', null);
+                                await globalConfig.setAsync('clientSecret', null);
+                                await globalConfig.setAsync('airtablePat', null);
+                                setConfirmingDisconnect(false);
+                                setClientId('');
+                                setClientSecret('');
+                                setAirtablePat('');
+                                setUserName(null);
+                                setStatus(null);
+                                setShowManual(false);
+                                if (onDisconnect) onDisconnect();
+                            }}
+                            disabled={!canWrite}
+                            variant="danger"
+                            style={{ flex: '1 1 50%' }}
+                        >
+                            Confirm Disconnect
+                        </Button>
+                    </Box>
+                </Box>
             )}
         </Box>
     );

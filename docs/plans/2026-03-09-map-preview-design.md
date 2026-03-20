@@ -1,4 +1,4 @@
-# Map Preview Dialog — Design
+# Map Preview Dialog - Design
 
 ## Overview
 

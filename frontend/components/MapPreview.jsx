@@ -56,15 +56,21 @@ export default function MapPreview({ mapId, mapLabel, onClose }) {
                     {mapLabel || 'Map Preview'}
                 </Text>
                 <Box display="flex" alignItems="center" className="gap-2 shrink-0 ml-2">
+                    <Text size="small" className="text-gray-400 hidden sm:block">
+                        Style cards, popups &amp; markers · Add filters
+                    </Text>
                     <Button
                         onClick={() => window.open(mapUrl, '_blank', 'noreferrer')}
-                        variant="default"
+                        variant="primary"
                         size="small"
                     >
-                        Customize in Mapsemble
-                    </Button>
-                    <Button onClick={handleClose} variant="default" size="small">
-                        Close
+                        <Box display="flex" alignItems="center" className="gap-1">
+                            Customize in Mapsemble
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M7 17L17 7"/>
+                                <path d="M7 7h10v10"/>
+                            </svg>
+                        </Box>
                     </Button>
                 </Box>
             </Box>

@@ -45,6 +45,8 @@ export function buildSlugMap(fieldEntries) {
  * Returns the raw cell value from a record, normalised to a plain JS value.
  */
 function getCellValue(record, fieldId) {
+    // Guard against deleted fields - getCellValue throws if the field no longer exists
+    if (!record.parentTable.getFieldByIdIfExists(fieldId)) return null;
     const val = record.getCellValue(fieldId);
     if (val === null || val === undefined) return null;
 
@@ -76,7 +78,7 @@ export function recordToFeature(record, fieldMapping) {
     let geometry = null;
 
     if (!locationMode || locationMode === 'dual') {
-        // Existing behavior — backward compat
+        // Existing behavior - backward compat
         const { latField, lngField } = fieldMapping;
         if (latField && lngField) {
             const lat = parseFloat(getCellValue(record, latField));
@@ -111,6 +113,15 @@ export function recordToFeature(record, fieldMapping) {
     const properties = {
         _airtable_id: record.id,
     };
+
+    // Include address value for geocoding
+    if (locationMode === 'single' && fieldMapping.locationFormat === 'address' && fieldMapping.locationColumn) {
+        const addressValue = getCellValue(record, fieldMapping.locationColumn);
+        if (addressValue) {
+            const addrSlug = toSlug(fieldMapping.locationColumnName || 'address');
+            properties[addrSlug] = String(addressValue);
+        }
+    }
 
     if (fields) {
         const slugMap = buildSlugMap(

@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 const createBundler = require('@airtable/blocks-webpack-bundler').default;
 const { DefinePlugin } = require('webpack');
 
@@ -7,6 +7,7 @@ function customizeWebpackConfig(config) {
     config.plugins.push(
         new DefinePlugin({
             'process.env.NGROK_URL': JSON.stringify(process.env.NGROK_URL || null),
+            'process.env.MAPSEMBLE_URL': JSON.stringify(process.env.MAPSEMBLE_URL || null),
         })
     );
 

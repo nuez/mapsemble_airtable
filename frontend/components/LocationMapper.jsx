@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
     useBase,
-    useRecords,
     useGlobalConfig,
     Box,
     Text,
@@ -10,28 +9,12 @@ import {
     FormField,
     Select,
 } from '@airtable/blocks/ui';
-import { detectColumnFormat } from '../services/locationParser.js';
-
-const FORMAT_BADGE_CLASSES = {
-    geojson: 'bg-emerald-100 text-emerald-900',
-    wkt: 'bg-violet-100 text-violet-900',
-    coordinate_pair: 'bg-blue-100 text-blue-800',
-    default: 'bg-gray-100 text-gray-700',
-};
-
-const FORMAT_LABELS = {
-    geojson: 'GeoJSON detected',
-    wkt: 'WKT detected',
-    coordinate_pair: 'Coordinate pair detected',
-    default: 'Address detected',
-};
-
 const FORMAT_DESCRIPTIONS = {
     geojson: 'GeoJSON geometry stored as a JSON string, e.g. {"type":"Point","coordinates":[2.35,48.85]}',
     wkt: 'Well-Known Text geometry, e.g. POINT(2.3522 48.8566)',
     coordinate_pair: 'Latitude and longitude in one field, e.g. 48.8566, 2.3522',
-    address: 'Plain text addresses — Mapsemble will geocode them automatically.',
-    default: 'Plain text addresses — Mapsemble will geocode them automatically.',
+    address: 'Street address or place name - Mapsemble will geocode it to coordinates.',
+    default: 'Coming soon',
 };
 
 function LocationModeCard({ selected, onClick, title, description }) {
@@ -54,8 +37,10 @@ function LocationModeCard({ selected, onClick, title, description }) {
     );
 }
 
-export default function LocationMapper({ tableId, initialConfig, onComplete, onCancel }) {
+export default function LocationMapper({ tableId, initialConfig, onComplete, onCancel, hasGeocoding }) {
     const base = useBase();
+    const globalConfig = useGlobalConfig();
+    const canWrite = globalConfig.hasPermissionToSet();
     const table = base.getTableByIdIfExists(tableId);
     const fields = table ? table.fields : [];
 
@@ -63,57 +48,42 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
     const [latField, setLatField] = useState(initialConfig?.latField || '');
     const [lngField, setLngField] = useState(initialConfig?.lngField || '');
     const [locationColumn, setLocationColumn] = useState(initialConfig?.locationColumn || '');
-    const [locationFormat, setLocationFormat] = useState(initialConfig?.locationFormat || 'auto');
-    const [detectedFormat, setDetectedFormat] = useState(null);
-    const [hasMixed, setHasMixed] = useState(false);
+    const [locationFormat, setLocationFormat] = useState(
+        initialConfig?.locationFormat && initialConfig.locationFormat !== 'auto'
+            ? initialConfig.locationFormat
+            : '',
+    );
 
-    const sampleRecords = useRecords(table, {
-        fields: table
-            ? (locationColumn ? [locationColumn] : [table.fields[0]?.id].filter(Boolean))
-            : [],
-    });
-
+    // Auto-detect lat/lng fields in dual-column mode
     useEffect(() => {
-        if (locationMode !== 'single' || !locationColumn || !sampleRecords?.length) {
-            setDetectedFormat(null);
-            setHasMixed(false);
-            return;
-        }
-        const sampleValues = sampleRecords
-            .slice(0, 50)
-            .map(r => {
-                const val = r.getCellValue(locationColumn);
-                return val !== null && val !== undefined ? String(val) : '';
-            })
-            .filter(v => v.trim() !== '');
-        const result = detectColumnFormat(sampleValues);
-        setDetectedFormat(result.format);
-        setHasMixed(result.hasMixed);
-    }, [locationMode, locationColumn, sampleRecords]);
+        if (locationMode !== 'dual' || latField || lngField || !fields.length) return;
+        const latPatterns = /^(lat|latitude)$/i;
+        const lngPatterns = /^(lon|lng|longitude)$/i;
+        const matchedLat = fields.find(f => latPatterns.test(f.name));
+        const matchedLng = fields.find(f => lngPatterns.test(f.name));
+        if (matchedLat) setLatField(matchedLat.id);
+        if (matchedLng) setLngField(matchedLng.id);
+    }, [locationMode, fields]);
 
     const canAdvance = locationMode === 'dual'
         ? latField && lngField
-        : locationColumn;
+        : locationColumn && locationFormat && (locationFormat !== 'address' || hasGeocoding);
 
     const fieldOptions = [
-        { value: '', label: '— none —' },
+        { value: '', label: '- none -' },
         ...fields.map(f => ({ value: f.id, label: f.name })),
     ];
     const locationColumnOptions = [
-        { value: '', label: '— select column —' },
+        { value: '', label: '- select column -' },
         ...fields.map(f => ({ value: f.id, label: f.name })),
     ];
     const locationFormatOptions = [
-        { value: 'auto', label: 'Auto-detect' },
+        { value: '', label: '- select format -' },
         { value: 'geojson', label: 'GeoJSON' },
         { value: 'wkt', label: 'WKT' },
         { value: 'coordinate_pair', label: 'Coordinate Pair (lat, lng)' },
-        { value: 'address', label: 'Address (server geocoded)' },
+        { value: 'address', label: hasGeocoding ? 'Address (Geocoding)' : 'Geocoding' },
     ];
-
-    const formatBadgeClasses = FORMAT_BADGE_CLASSES[detectedFormat] || FORMAT_BADGE_CLASSES.default;
-    const formatLabel = FORMAT_LABELS[detectedFormat] || FORMAT_LABELS.default;
-    const formatDescription = FORMAT_DESCRIPTIONS[detectedFormat] || FORMAT_DESCRIPTIONS.default;
 
     function handleComplete() {
         onComplete({
@@ -152,7 +122,7 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
                     selected={locationMode === 'single'}
                     onClick={() => setLocationMode('single')}
                     title="One column"
-                    description="Location is in a single field — address, coordinates, WKT, or GeoJSON."
+                    description="Location is in a single field - address, coordinates, WKT, or GeoJSON."
                 />
             </Box>
 
@@ -201,41 +171,7 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
 
                     {locationColumn && (
                         <>
-                            {/* Detection result */}
-                            <Box
-                                padding={2}
-                                marginBottom={2}
-                                className="bg-white border border-gray-200 rounded"
-                            >
-                                <Box display="flex" alignItems="center" marginBottom={1} className="gap-1.5">
-                                    {detectedFormat && (
-                                        <Box
-                                            as="span"
-                                            className={`${formatBadgeClasses} rounded text-[11px] font-semibold py-0.5 px-2`}
-                                        >
-                                            {formatLabel}
-                                        </Box>
-                                    )}
-                                    {hasMixed && (
-                                        <Box
-                                            as="span"
-                                            className="bg-yellow-100 text-yellow-800 rounded text-[11px] font-semibold py-0.5 px-2"
-                                        >
-                                            Mixed formats
-                                        </Box>
-                                    )}
-                                </Box>
-                                <Text size="small" className="text-gray-500">
-                                    {formatDescription}
-                                </Text>
-                                {hasMixed && (
-                                    <Text size="small" className="text-amber-800 mt-1">
-                                        Multiple formats found. Use the override below to pick one consistently.
-                                    </Text>
-                                )}
-                            </Box>
-
-                            <FormField label="Format override">
+                            <FormField label="Format">
                                 <Select
                                     size="small"
                                     options={locationFormatOptions}
@@ -243,6 +179,25 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
                                     onChange={value => setLocationFormat(value)}
                                 />
                             </FormField>
+                            {locationFormat && (
+                                <Text size="small" className="text-gray-500 mt-1">
+                                    {FORMAT_DESCRIPTIONS[locationFormat] || ''}
+                                </Text>
+                            )}
+                            {locationFormat === 'address' && !hasGeocoding && (
+                                <Box padding={2} marginTop={2} className="bg-blue-50 border border-blue-200 rounded">
+                                    <Text size="small" className="text-blue-800">
+                                        Geocoding is only available on the PRO plan. Upgrade Mapsemble to PRO to use geocoding.
+                                    </Text>
+                                </Box>
+                            )}
+                            {locationFormat === 'address' && hasGeocoding && (
+                                <Box padding={2} marginTop={2} className="bg-blue-50 border border-blue-200 rounded">
+                                    <Text size="small" className="text-blue-800">
+                                        Mapsemble will geocode addresses and text fields to coordinates automatically when you sync.
+                                    </Text>
+                                </Box>
+                            )}
                         </>
                     )}
                 </Box>
@@ -252,7 +207,9 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
                 <Text size="small" marginBottom={2} className="text-amber-600">
                     {locationMode === 'dual'
                         ? 'Select both a latitude and a longitude field to continue.'
-                        : 'Select a location column to continue.'}
+                        : locationColumn && locationFormat === 'address' && !hasGeocoding
+                            ? 'Geocoding is not available yet.'
+                            : 'Select a location column and format to continue.'}
                 </Text>
             )}
 
@@ -262,7 +219,7 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
                 </Button>
                 <Button
                     onClick={handleComplete}
-                    disabled={!canAdvance}
+                    disabled={!canWrite || !canAdvance}
                     variant="primary"
                     flex="2"
                 >

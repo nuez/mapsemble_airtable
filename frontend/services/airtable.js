@@ -85,7 +85,7 @@ export async function checkAirtableWebhookAccess(baseId, pat) {
         const body = await res.json();
         if (body.error?.message) message = body.error.message;
         else if (body.message) message = body.message;
-        if (res.status === 401) message = 'Invalid PAT — check your token in Settings.';
+        if (res.status === 401) message = 'Invalid PAT - check your token in Settings.';
         if (res.status === 403) message = body.error?.message || 'Missing scope or base access. Ensure the PAT has data.records:read and webhook:manage scopes and that this base is in the token\'s Access list.';
     } catch (_e) { /* ignore */ }
 
@@ -93,7 +93,7 @@ export async function checkAirtableWebhookAccess(baseId, pat) {
 }
 
 /**
- * Delete an Airtable webhook. Best-effort — errors are swallowed.
+ * Delete an Airtable webhook. Best-effort - errors are swallowed.
  *
  * @param {string} baseId     - Airtable base ID
  * @param {string} webhookId  - Airtable webhook ID
@@ -172,7 +172,7 @@ export async function checkPatScopes(baseId, tableId, pat) {
             return { ok: false, errors: ['Invalid token. Please check your Personal Access Token.'] };
         }
         if (whRes.status === 403 || whRes.status === 404) {
-            // Could be missing scope OR missing base access — Airtable returns 404 for bases not in Access list
+            // Could be missing scope OR missing base access - Airtable returns 404 for bases not in Access list
             const body = await whRes.json().catch(() => ({}));
             const msg = body.error?.message || '';
             if (msg.toLowerCase().includes('scope')) {
@@ -242,7 +242,7 @@ export async function refreshAirtableWebhook(baseId, webhookId, pat) {
                 'Content-Type': 'application/json',
             },
         });
-        // Swallow errors — this is a best-effort safety net
+        // Swallow errors - this is a best-effort safety net
     } catch (_err) {
         // ignore
     }

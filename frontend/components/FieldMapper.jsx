@@ -45,21 +45,23 @@ const FALLBACK_TYPES = [
 export default function FieldMapper({ tableId, initialConfig, locationFieldIds = [], onComplete, onBack }) {
     const base = useBase();
     const globalConfig = useGlobalConfig();
+    const canWrite = globalConfig.hasPermissionToSet();
     const table = base.getTableByIdIfExists(tableId);
     const fields = table ? table.fields : [];
-    // eslint-disable-next-line no-console
-    console.log('[Mapsemble] Airtable fields:', fields.map(f => ({ id: f.id, name: f.name, type: f.type })));
+
+    const firstTextField = fields.find(f =>
+        f.type === FieldType.SINGLE_LINE_TEXT || f.type === FieldType.MULTILINE_TEXT
+    );
 
     const [labelField, setLabelField] = useState(initialConfig?.labelField || '');
     const [fieldMapping, setFieldMapping] = useState(() => {
         const base = initialConfig?.fieldMapping || {};
         const skipped = Object.fromEntries(locationFieldIds.map(id => [id, { remoteType: '' }]));
         const result = { ...base, ...skipped };
-        // eslint-disable-next-line no-console
-        console.log('[Mapsemble] FieldMapper init — locationFieldIds:', locationFieldIds, 'fieldMapping:', result);
         return result;
     });
     const [schemaTypes, setSchemaTypes] = useState(FALLBACK_TYPES);
+    const [schemaFallback, setSchemaFallback] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [saveError, setSaveError] = useState('');
     const isMounted = useRef(true);
@@ -81,8 +83,6 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
         fetchSchema(getConfig(), (newToken) => globalConfig.setAsync('token', newToken))
             .then(schema => {
                 if (!isMounted.current) return;
-                // eslint-disable-next-line no-console
-                console.log('[Mapsemble] /api/v1/schema response:', schema);
 
                 const raw = schema.fieldTypes;
                 if (!raw) return;
@@ -105,14 +105,13 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
             .catch((err) => {
                 // eslint-disable-next-line no-console
                 console.warn('[Mapsemble] schema fetch failed, using fallback types:', err);
+                if (isMounted.current) setSchemaFallback(true);
             });
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     function getDefaultType(field) {
         const suggested = FIELD_TYPE_MAP[field.type];
         const match = suggested && schemaTypes.some(t => t.value === suggested);
-        // eslint-disable-next-line no-console
-        console.log('[Mapsemble] getDefaultType', { fieldName: field.name, airtableType: field.type, suggested, match, schemaTypeValues: schemaTypes.map(t => t.value) });
         if (match) return suggested;
         return schemaTypes[0]?.value || '';
     }
@@ -132,7 +131,18 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
             const validValues = getFieldTypeOptions(field).map(t => t.value);
             if (stored === '' || validValues.includes(stored)) return stored;
         }
-        return getDefaultType(field);
+        return '';
+    }
+
+    function handleAutoDetect() {
+        if (!labelField && firstTextField) {
+            setLabelField(firstTextField.id);
+        }
+        const detected = {};
+        for (const field of fields) {
+            detected[field.id] = { remoteType: getDefaultType(field) };
+        }
+        setFieldMapping(prev => ({ ...prev, ...detected }));
     }
 
     async function handleComplete() {
@@ -163,7 +173,7 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
         const available = suggested
             ? schemaTypes.filter(t => t.value === suggested)
             : schemaTypes;
-        return [{ value: '', label: '— skip —' }, ...available];
+        return [{ value: '', label: '- skip -' }, ...available];
     }
 
     function getSlugMap() {
@@ -184,13 +194,56 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
     return (
         <Box padding={3}>
             <Heading size="small" marginBottom={1}>Map your fields</Heading>
-            <Text size="small" className="text-gray-500" marginBottom={1}>
+            <Text className="text-gray-500" marginBottom={2}>
                 Choose how each Airtable field is represented on your map pins. Fields marked <em>skip</em> won't be included.
             </Text>
-            <Text size="small" className="text-gray-400" marginBottom={3}>
-                Types are pre-filled based on your Airtable field types — adjust any that don't look right.
-            </Text>
 
+
+            {schemaFallback && (
+                <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                    <Text size="small" className="text-amber-700">
+                        Could not load field types from Mapsemble. Using default types - you can adjust them manually.
+                    </Text>
+                </Box>
+            )}
+
+            <Box
+                padding={2}
+                marginBottom={3}
+                className="!bg-amber-50 border !border-amber-200 !rounded-md !my-5"
+            >
+                <Text fontWeight="strong" className="!text-amber-800 !mb-2">
+                    Data will be shared publicly
+                </Text>
+                <Text  className="text-amber-700 mt-1 !mb-5">
+                    Mapped fields are synchronised to Mapsemble and may be visible through markers, filters, cards and popups. Only include fields you intend to expose. Fields marked <em>skip</em> won't be synchronised.
+                </Text>
+
+                <Text  className="text-amber-700 mt-1">
+                  Need the map data to stay private? contact us at <a href="mailto://help@mapsemble.com" className="text-amber-700 underline">help@mapsemble.com</a>
+                </Text>
+            </Box>
+            <Box
+              display="flex"
+              alignItems="center"
+              justifyContent="space-between"
+              padding={2}
+              marginBottom={3}
+              paddingBottom={3}
+              className="!bg-blue-50 border !border-blue-200 !rounded-md"
+            >
+                <Box flex="1" marginRight={3}>
+                    <Text  className="!text-blue-800">
+                        Auto-configure fields
+                    </Text>
+                    <Text size="small" className="!text-blue-700 !mt-1">
+                        Detects field types from your Airtable schema and sets the label to your first text field. You can adjust anything afterwards.
+                    </Text>
+                </Box>
+                <Button variant="primary" size="small" onClick={handleAutoDetect} style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
+                    Auto-detect
+                </Button>
+            </Box>
             <FormField
                 label="Label field"
                 description="Required. This field will be used as the display name for each map pin."
@@ -198,7 +251,7 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
             >
                 <Select
                     options={[
-                        { value: '', label: '— select a label field —' },
+                        { value: '', label: '- select a label field -' },
                         ...fields.map(f => ({ value: f.id, label: f.name })),
                     ]}
                     value={labelField}
@@ -207,63 +260,66 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
             </FormField>
 
             {fields.length > 0 && (
-                <Box marginBottom={3} className="max-h-60 overflow-y-auto">
-                    <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-                        <colgroup>
-                            <col />
-                            <col style={{ width: 144 }} />
-                            <col style={{ width: 112 }} />
-                        </colgroup>
-                        <thead style={{ position: 'sticky', top: 0, backgroundColor: '#fff', zIndex: 1 }}>
-                            <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
-                                <th style={{ textAlign: 'left', padding: '4px 4px 6px', fontWeight: 'normal' }}>
-                                    <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em]">Airtable field</Text>
-                                </th>
-                              <th style={{ textAlign: 'left', padding: '4px 4px 6px', fontWeight: 'normal' }}>
-                                <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em] whitespace-nowrap">Mapsemble field</Text>
-                              </th>
-                                <th style={{ textAlign: 'left', padding: '4px 4px 6px', fontWeight: 'normal' }}>
-                                    <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em]">Field type</Text>
-                                </th>
-
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {(() => {
-                                const slugMap = getSlugMap();
-                                return fields.map(field => {
-                                    const slug = slugMap[field.id];
-                                    return (
-                                        <tr key={field.id}>
-                                            <td style={{ padding: '2px 4px', overflow: 'hidden' }}>
-                                                <Text size="small" className="truncate block" title={field.name}>
-                                                    {field.name}
-                                                </Text>
-                                            </td>
-
-                                            <td style={{ padding: '2px 4px', overflow: 'hidden' }}>
-                                                {slug ? (
-                                                    <Text size="small" className="font-mono text-gray-500 truncate block" title={slug}>
-                                                        {slug}
+                <Box marginBottom={3}>
+                    <Box marginBottom={1}>
+                        <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em]">Field mapping</Text>
+                    </Box>
+                    <Box className="max-h-60 overflow-y-auto">
+                        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+                            <colgroup>
+                                <col style={{ width: '33.33%' }} />
+                                <col style={{ width: '33.33%' }} />
+                                <col style={{ width: '33.34%' }} />
+                            </colgroup>
+                            <thead style={{ position: 'sticky', top: 0, backgroundColor: '#fff', zIndex: 1 }}>
+                                <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
+                                    <th style={{ textAlign: 'left', padding: '4px 4px 6px', fontWeight: 'normal' }}>
+                                        <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em]">Airtable field</Text>
+                                    </th>
+                                    <th style={{ textAlign: 'left', padding: '4px 4px 6px', fontWeight: 'normal' }}>
+                                        <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em] whitespace-nowrap">Mapsemble field</Text>
+                                    </th>
+                                    <th style={{ textAlign: 'left', padding: '4px 4px 6px', fontWeight: 'normal' }}>
+                                        <Text size="small" className="text-gray-500 font-semibold uppercase tracking-[0.05em]">Field type</Text>
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {(() => {
+                                    const slugMap = getSlugMap();
+                                    return fields.map(field => {
+                                        const slug = slugMap[field.id];
+                                        return (
+                                            <tr key={field.id}>
+                                                <td style={{ padding: '2px 4px', overflow: 'hidden' }}>
+                                                    <Text size="small" className="truncate block" title={field.name}>
+                                                        {field.name}
                                                     </Text>
-                                                ) : (
-                                                    <Text size="small" className="text-gray-300">—</Text>
-                                                )}
-                                            </td>
-                                          <td style={{ padding: '2px 4px' }}>
-                                            <Select
-                                              size="small"
-                                              options={getFieldTypeOptions(field)}
-                                              value={getFieldType(field.id)}
-                                              onChange={value => handleFieldTypeChange(field.id, value)}
-                                            />
-                                          </td>
-                                        </tr>
-                                    );
-                                });
-                            })()}
-                        </tbody>
-                    </table>
+                                                </td>
+                                                <td style={{ padding: '2px 4px', overflow: 'hidden' }}>
+                                                    {slug ? (
+                                                        <Text size="small" className="font-mono text-gray-500 truncate block" title={slug}>
+                                                            {slug}
+                                                        </Text>
+                                                    ) : (
+                                                        <Text size="small" className="text-gray-300">-</Text>
+                                                    )}
+                                                </td>
+                                                <td style={{ padding: '2px 4px' }}>
+                                                    <Select
+                                                        size="small"
+                                                        options={getFieldTypeOptions(field)}
+                                                        value={getFieldType(field.id)}
+                                                        onChange={value => handleFieldTypeChange(field.id, value)}
+                                                    />
+                                                </td>
+                                            </tr>
+                                        );
+                                    });
+                                })()}
+                            </tbody>
+                        </table>
+                    </Box>
                 </Box>
             )}
 
@@ -283,7 +339,7 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
                 </Button>
                 <Button
                     onClick={handleComplete}
-                    disabled={!labelField || isSaving}
+                    disabled={!canWrite || !labelField || isSaving}
                     variant="primary"
                     flex="2"
                 >

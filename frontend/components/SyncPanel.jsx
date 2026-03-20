@@ -5,6 +5,7 @@ import {
     useGlobalConfig,
     Box,
     Text,
+    Heading,
     Button,
     Input,
 } from '@airtable/blocks/ui';
@@ -17,21 +18,40 @@ import {
     MAPSEMBLE_URL,
 } from '../services/mapsemble';
 
-const BATCH_SIZE = 1000;
+const BATCH_SIZE = 500;
 const MAX_ERRORS = 10;
 
 function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, hasWebhook }) {
     const globalConfig = useGlobalConfig();
-    const records = useRecords(table, { fields: table.fields.map(f => f.id) });
+    const canWrite = globalConfig.hasPermissionToSet();
+    const neededFieldIds = (() => {
+        const tc = globalConfig.get(['tableConfigs', tableId]) || {};
+        const fm = tc.fieldMapping || {};
+        const ids = new Set(
+            Object.entries(fm)
+                .filter(([, meta]) => meta.remoteType)
+                .map(([id]) => id)
+        );
+        if (tc.latField) ids.add(tc.latField);
+        if (tc.lngField) ids.add(tc.lngField);
+        if (tc.locationColumn) ids.add(tc.locationColumn);
+        if (tc.labelField) ids.add(tc.labelField);
+        // Filter to fields that still exist on the table
+        return [...ids].filter(id => table.getFieldByIdIfExists(id));
+    })();
+    const records = useRecords(table, { fields: neededFieldIds });
 
     const tableConfig = globalConfig.get(['tableConfigs', tableId]) || {};
     const activeMap   = (tableConfig.maps || []).find(m => m.mapId === mapId) || null;
     const lastSync    = activeMap?.lastSync  || null;
 
+    const [deletedFields, setDeletedFields] = useState([]);
+    const [confirmSync, setConfirmSync] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [progress, setProgress] = useState(null); // { phase: 'upsert'|'prune_read'|'prune_delete', done, total }
     const [errors, setErrors] = useState([]);
     const [mapNotFound, setMapNotFound] = useState(false);
+    const [limitInfo, setLimitInfo] = useState(null); // { limit, current, totalRecords }
 
     const abortRef = useRef(false);
 
@@ -48,18 +68,28 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
         const tc = globalConfig.get(['tableConfigs', tableId]) || {};
         const storedFields = tc.fieldMapping || {};
         const fields = {};
+        const missing = [];
         for (const [fieldId, meta] of Object.entries(storedFields)) {
             const liveField = table.getFieldByIdIfExists(fieldId);
-            fields[fieldId] = { ...meta, name: liveField ? liveField.name : (meta.name || fieldId) };
+            if (!liveField) {
+                if (meta.remoteType) missing.push(meta.name || fieldId);
+                continue; // skip deleted fields
+            }
+            fields[fieldId] = { ...meta, name: liveField.name };
         }
+        if (missing.length > 0 && deletedFields.length === 0) setDeletedFields(missing);
+        const locationColumnName = tc.locationColumn
+            ? (table.getFieldByIdIfExists(tc.locationColumn)?.name || '')
+            : '';
         return {
             locationMode:   tc.locationMode || 'dual',
-            latField:       tc.latField,
-            lngField:       tc.lngField,
-            locationColumn: tc.locationColumn,
+            latField:       tc.latField && table.getFieldByIdIfExists(tc.latField) ? tc.latField : null,
+            lngField:       tc.lngField && table.getFieldByIdIfExists(tc.lngField) ? tc.lngField : null,
+            locationColumn: tc.locationColumn && table.getFieldByIdIfExists(tc.locationColumn) ? tc.locationColumn : null,
             locationFormat: tc.locationFormat || 'auto',
+            locationColumnName,
             fields,
-            labelField:     tc.labelField || null,
+            labelField:     tc.labelField && table.getFieldByIdIfExists(tc.labelField) ? tc.labelField : null,
         };
     }
 
@@ -86,6 +116,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
         abortRef.current = false;
         setErrors([]);
         setMapNotFound(false);
+        setLimitInfo(null);
         let mapGone = false;
 
         const fieldMapping = getFieldMapping();
@@ -98,11 +129,20 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
 
         const total = features.length;
 
+        let limitReached = false;
+
         if (total <= 1000) {
             // --- Tier 1: single PUT (full reconciliation) ---
             setProgress({ phase: 'upsert', done: 0, total });
             try {
-                await putFeatures(mapId, features, config, setToken);
+                const result = await putFeatures(mapId, features, config, setToken);
+                const limitFail = (result?.failed || []).find(
+                    f => f.code === 'location_limit_reached'
+                );
+                if (limitFail) {
+                    limitReached = true;
+                    setLimitInfo({ limit: limitFail.limit, current: limitFail.current, totalRecords: total });
+                }
             } catch (err) {
                 if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
                 else { addError(`Sync failed: ${err.message}`); }
@@ -111,69 +151,87 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
         } else {
             // --- Tier 2: batched POST upsert + GET-diff DELETE ---
 
-            // Phase A — Upsert
+            // Pre-fetch existing map IDs for pruning (skip on first sync - nothing to prune)
+            let mapIds = null;
+            if (lastSync) {
+                setProgress({ phase: 'prune_read', done: 0, total: 0 });
+                try {
+                    mapIds = await fetchAllMapAirtableIds(mapId, config, setToken, (count, total) => {
+                        setProgress({ phase: 'prune_read', done: count, total: total || 0 });
+                    });
+                } catch (err) {
+                    if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
+                    else { addError(`Could not fetch existing map features for cleanup: ${err.message}`); }
+                }
+            }
+
+            // Phase A - Upsert
             let upsertHadErrors = false;
             setProgress({ phase: 'upsert', done: 0, total });
 
             for (let i = 0; i < total; i += BATCH_SIZE) {
-                if (abortRef.current) break;
+                if (abortRef.current || limitReached) break;
 
                 const batch = features.slice(i, i + BATCH_SIZE);
                 try {
-                    await syncFeatures(mapId, batch, config, setToken);
+                    const result = await syncFeatures(mapId, batch, config, setToken);
+                    const limitFail = (result?.failed || []).find(
+                        f => f.code === 'location_limit_reached'
+                    );
+                    if (limitFail) {
+                        limitReached = true;
+                        setLimitInfo({ limit: limitFail.limit, current: limitFail.current, totalRecords: total });
+                    }
                 } catch (err) {
                     if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); upsertHadErrors = true; }
                     else { addError(`Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`); upsertHadErrors = true; }
                 }
 
+                await new Promise(r => setTimeout(r, 200));
                 setProgress({ phase: 'upsert', done: Math.min(i + BATCH_SIZE, total), total });
             }
 
-            // Phase B — Prune removed records (skip if aborted or upsert had errors)
-            if (!abortRef.current && !upsertHadErrors) {
-                setProgress({ phase: 'prune_read', done: 0, total: 0 });
+            // Phase B - Prune removed records (skip if aborted, upsert had errors, limit reached, or no pre-fetched IDs)
+            if (!abortRef.current && !upsertHadErrors && !limitReached && mapIds !== null) {
+                const currentIds = new Set(features.map(f => f.properties._airtable_id));
+                const orphans = [...mapIds].filter(id => !currentIds.has(id));
 
-                let mapIds;
-                try {
-                    mapIds = await fetchAllMapAirtableIds(mapId, config, setToken);
-                } catch (err) {
-                    if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
-                    else { addError(`Could not fetch existing map features for cleanup: ${err.message}`); }
-                    mapIds = null;
-                }
-
-                if (mapIds !== null) {
-                    const currentIds = new Set(features.map(f => f.properties._airtable_id));
-                    const orphans = [...mapIds].filter(id => !currentIds.has(id));
-
-                    if (orphans.length > 0) {
-                        let deleteDone = 0;
-                        for (let i = 0; i < orphans.length; i += BATCH_SIZE) {
-                            if (abortRef.current) {
-                                addError('Sync cancelled — some deleted records may still appear on the map.');
-                                break;
-                            }
-                            const batch = orphans.slice(i, i + BATCH_SIZE);
-                            try {
-                                await deleteFeaturesByAirtableIds(mapId, batch, config, setToken);
-                            } catch (err) {
-                                addError(`Delete batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
-                            }
-                            deleteDone = Math.min(i + BATCH_SIZE, orphans.length);
-                            setProgress({ phase: 'prune_delete', done: deleteDone, total: orphans.length });
+                if (orphans.length > 0) {
+                    let deleteDone = 0;
+                    for (let i = 0; i < orphans.length; i += BATCH_SIZE) {
+                        if (abortRef.current) {
+                            addError('Sync cancelled - some deleted records may still appear on the map.');
+                            break;
                         }
+                        const batch = orphans.slice(i, i + BATCH_SIZE);
+                        try {
+                            await deleteFeaturesByAirtableIds(mapId, batch, config, setToken);
+                        } catch (err) {
+                            addError(`Delete batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
+                        }
+                        await new Promise(r => setTimeout(r, 200));
+                        deleteDone = Math.min(i + BATCH_SIZE, orphans.length);
+                        setProgress({ phase: 'prune_delete', done: deleteDone, total: orphans.length });
                     }
                 }
             } else if (upsertHadErrors) {
-                addError('Removal of deleted records skipped — re-sync after fixing errors above.');
+                addError('Removal of deleted records skipped - re-sync after fixing errors above.');
             }
         }
 
         if (!abortRef.current && !mapGone) {
-            await updateActiveMap({ lastSync: new Date().toISOString() });
+            await updateActiveMap({
+                lastSync: new Date().toISOString(),
+                ...(limitReached ? { limitReached: true } : { limitReached: false }),
+            });
         }
         setSyncing(false);
         setProgress(null);
+
+        // Auto-advance to next step after successful sync
+        if (!abortRef.current && !mapGone && onNext) {
+            onNext();
+        }
     }
 
     function formatDate(iso) {
@@ -199,13 +257,78 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
 
     const progressBarColor = progress?.phase === 'prune_delete' ? '#ef4444' : '#3b82f6';
 
+    if (syncing) {
+        return (
+            <Box
+                display="flex"
+                flexDirection="column"
+                alignItems="center"
+                justifyContent="center"
+                padding={3}
+                style={{ height: '100%', minHeight: 300 }}
+            >
+                <Box
+                    style={{
+                        width: 40,
+                        height: 40,
+                        border: '3px solid #e5e7eb',
+                        borderTopColor: '#2563eb',
+                        borderRadius: '50%',
+                        animation: 'mapsemble-spin 0.8s linear infinite',
+                        marginBottom: 16,
+                    }}
+                />
+                <Heading size="small" marginBottom={2}>{progressLabel || 'Syncing...'}</Heading>
+                {progress && (
+                    <Box width="80%" marginBottom={2}>
+                        <Box display="flex" justifyContent="center" marginBottom={1}>
+                            <Text size="small" textColor="light">
+                                {progress.phase === 'prune_read'
+                                    ? (progress.total > 0 ? `${progress.done} / ${progress.total} checked` : `${progress.done} checked`)
+                                    : `${progress.done} / ${progress.total}`}
+                            </Text>
+                        </Box>
+                        {progress.phase !== 'prune_read' && (
+                            <Box className="bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                                <Box
+                                    className="h-full rounded-full transition-[width] duration-200"
+                                    style={{ width: `${progressPct}%`, backgroundColor: progressBarColor }}
+                                />
+                            </Box>
+                        )}
+                    </Box>
+                )}
+                <Button
+                    onClick={() => { abortRef.current = true; }}
+                    variant="default"
+                    size="small"
+                    marginTop={1}
+                >
+                    Cancel
+                </Button>
+                <style>{`@keyframes mapsemble-spin { to { transform: rotate(360deg); } }`}</style>
+            </Box>
+        );
+    }
+
     return (
         <Box padding={3}>
             {showHeader && (
                 <Box display="flex" alignItems="center" marginBottom={3}>
                     <Button onClick={onBack} variant="default" size="small">← Back</Button>
                     <Text marginLeft={2} fontWeight="strong">
-                        {activeMap?.mapLabel} — {table.name}
+                        {activeMap?.mapLabel} - {table.name}
+                    </Text>
+                </Box>
+            )}
+
+            {deletedFields.length > 0 && (
+                <Box padding={2} marginBottom={2} className="bg-red-50 border border-red-200 rounded-md">
+                    <Text size="small" className="text-red-700" marginBottom={1}>
+                        Some mapped fields were deleted: {deletedFields.join(', ')}
+                    </Text>
+                    <Text size="small" className="text-red-600">
+                        Update your field mapping to avoid missing data.
                     </Text>
                 </Box>
             )}
@@ -223,9 +346,23 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
                         variant="danger"
                         size="small"
                         marginTop={2}
+                        disabled={!canWrite}
                     >
                         Remove from list
                     </Button>
+                </Box>
+            )}
+
+            {limitInfo && (
+                <Box padding={2} marginBottom={3} className="bg-amber-50 border border-amber-300 rounded-md">
+                    <Text size="small" fontWeight="strong" className="text-amber-800">
+                        Location limit reached
+                    </Text>
+                    <Text size="small" className="text-amber-700 mt-1">
+                        Your plan allows up to {limitInfo.limit} locations per map.
+                        {limitInfo.totalRecords} records were found in Airtable but only {limitInfo.limit} were synced.
+                        Upgrade your plan to sync all records.
+                    </Text>
                 </Box>
             )}
 
@@ -240,45 +377,56 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
                     )}
                 </Box>
 
-                {syncing && progress && (
-                    <Box marginBottom={2}>
-                        <Box display="flex" justifyContent="space-between" marginBottom={1}>
-                            <Text size="small" textColor="light">{progressLabel}</Text>
-                            {progress.phase !== 'prune_read' && (
-                                <Text size="small" textColor="light">{progress.done} / {progress.total}</Text>
-                            )}
-                        </Box>
-                        {/* Progress bar — hidden during prune_read phase (total unknown) */}
-                        {progress.phase !== 'prune_read' && (
-                            <Box className="bg-gray-200 rounded-full h-1.5 overflow-hidden">
-                                <Box
-                                    className="h-full rounded-full transition-[width] duration-200"
-                                    style={{ width: `${progressPct}%`, backgroundColor: progressBarColor }}
-                                />
-                            </Box>
-                        )}
+                <Box
+                    padding={2}
+                    marginBottom={2}
+                    className="bg-amber-50 border border-amber-200 rounded-md"
+                >
+                  <Text fontWeight="strong" className="!text-amber-800 !mb-2">
+                    Data will be shared publicly
+                  </Text>
+                  <Text  className="text-amber-700 mt-1 !mb-5">
+                    Mapped fields are synchronised to Mapsemble and may be visible through markers, filters, cards and popups. Only include fields you intend to expose.
+                  </Text>
+                </Box>
+
+                {!canWrite && (
+                    <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                        <Text size="small" className="text-amber-700">
+                            Read-only access. You need creator permissions to sync data.
+                        </Text>
                     </Box>
                 )}
 
-                <Button
-                    onClick={handleSync}
-                    disabled={syncing || !mapId}
-                    variant="primary"
-                    width="100%"
-                >
-                    {syncing ? 'Syncing…' : 'Sync Now'}
-                </Button>
-
-                {syncing && (
+                {!confirmSync ? (
                     <Button
-                        onClick={() => { abortRef.current = true; }}
-                        variant="default"
+                        onClick={() => setConfirmSync(true)}
+                        disabled={!canWrite || syncing || !mapId}
+                        variant="primary"
                         width="100%"
-                        marginTop={1}
                     >
-                        Cancel
+                        Sync Now
                     </Button>
+                ) : (
+                    <Box padding={2} marginBottom={2} className="bg-blue-50 border border-blue-200 rounded-md">
+                        <Text size="small" marginBottom={2}>
+                            This will send {records.length} record{records.length !== 1 ? 's' : ''} from <strong>{table.name}</strong> to Mapsemble. Continue?
+                        </Text>
+                        <Box display="flex" className="gap-2">
+                            <Button onClick={() => setConfirmSync(false)} variant="default" flex="1">
+                                Cancel
+                            </Button>
+                            <Button
+                                onClick={() => { setConfirmSync(false); handleSync(); }}
+                                variant="primary"
+                                flex="1"
+                            >
+                                Confirm Sync
+                            </Button>
+                        </Box>
+                    </Box>
                 )}
+
             </Box>
 
             {/* Auto-sync status */}

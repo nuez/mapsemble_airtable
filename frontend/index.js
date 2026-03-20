@@ -1,10 +1,10 @@
 import './style.css';
-import { initializeBlock, useGlobalConfig, useBase, Box, Text, Button, Link } from '@airtable/blocks/ui';
+import { initializeBlock, useGlobalConfig, useBase, useCursor, Box, Text, Button, Link } from '@airtable/blocks/ui';
 import React, { useState, useEffect } from 'react';
 
-import { updateMap, MAPSEMBLE_URL, NGROK_URL } from './services/mapsemble';
+import { updateMap, fetchMe, MAPSEMBLE_URL, NGROK_URL } from './services/mapsemble';
 import { refreshAirtableWebhook, registerAirtableWebhook, deleteAirtableWebhook, listAirtableWebhooks } from './services/airtable';
-import { buildSlugMap } from './services/geojson';
+import { buildSlugMap, toSlug } from './services/geojson';
 import Setup from './components/Setup';
 import HomeScreen from './components/HomeScreen';
 import LocationMapper from './components/LocationMapper';
@@ -114,63 +114,49 @@ function CreateStepIndicator({ currentStep }) {
 }
 
 function CreatePreviewStep({ mapId, mapLabel, onDone, onFullscreen }) {
-    const embedUrl = `${MAPSEMBLE_URL}/embed/${mapId}`;
-    const mapUrl = `${MAPSEMBLE_URL}/maps/${mapId}`;
+    const mapUrl = `${MAPSEMBLE_URL}/map/${mapId}`;
 
     return (
-        <Box padding={3} display="flex" flexDirection="column" style={{ height: '100%' }}>
+        <Box padding={3}>
             <Text fontWeight="strong" marginBottom={2}>{mapLabel}</Text>
 
-            {/* Inline iframe – mobile-sized preview */}
             <Box
-                flex="auto"
-                style={{
-                    position: 'relative',
-                    borderRadius: 8,
-                    overflow: 'hidden',
-                    border: '1px solid #e5e7eb',
-                    minHeight: 240,
-                }}
+                padding={3}
+                marginBottom={3}
+                backgroundColor="#f0fdf4"
+                borderColor="#bbf7d0"
+                border="default"
+                borderRadius="default"
             >
-                <iframe
-                    src={embedUrl}
-                    title={mapLabel}
-                    sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-                    style={{
-                        width: '100%',
-                        height: '100%',
-                        border: 'none',
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                    }}
-                />
+                <Text size="small">
+                    Your map has been created and synced successfully.
+                </Text>
             </Box>
 
-            <Text size="small" textColor="light" marginTop={3}>
+            <Text size="small" textColor="light" marginBottom={3}>
                 Style your map in Mapsemble: customize cards, popups, markers, and filters.
             </Text>
 
-            <Box display="flex" justifyContent="space-between" alignItems="center" marginTop={2} style={{ gap: 8 }}>
+            <Box display="flex" justifyContent="space-between" alignItems="center" style={{ gap: 8 }}>
                 <Box display="flex" alignItems="center" style={{ gap: 8 }}>
-
-                  <Button
-                    onClick={() => window.open(mapUrl, '_blank', 'noreferrer')}
-                    variant="default"
-                    size="small"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, flexShrink: 0 }}>
-                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                      <polyline points="15 3 21 3 21 9"/>
-                      <line x1="10" y1="14" x2="21" y2="3"/>
-                    </svg>
-                    Customize in Mapsemble
-                  </Button>
+                    <Button
+                        onClick={() => window.open(mapUrl, '_blank', 'noreferrer')}
+                        variant="primary"
+                        size="small"
+                    >
+                        <Box display="flex" alignItems="center" className="gap-1">
+                            Customize in Mapsemble
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M7 17L17 7"/>
+                                <path d="M7 7h10v10"/>
+                            </svg>
+                        </Box>
+                    </Button>
                     <Button onClick={onFullscreen} variant="default" size="small">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, verticalAlign: 'middle' }}>
                             <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
                         </svg>
-                        Full screen
+                        Preview
                     </Button>
                 </Box>
                 <Button onClick={onDone} variant="primary" size="small">
@@ -231,14 +217,14 @@ function AppHeader({ mode, activeTableId, createStep, onSettingsClick, onCancelC
             {/* Sub-header for sync mode */}
             {mode === 'sync' && activeTable && (
                 <Box paddingX={3} paddingBottom={2}>
-                    <Text size="small" style={{ color: '#6b7280' }}>Sync — {activeTable.name}</Text>
+                    <Text size="small" style={{ color: '#6b7280' }}>Sync - {activeTable.name}</Text>
                 </Box>
             )}
 
             {/* Sub-header for modify mode */}
             {mode === 'modify' && activeTable && (
                 <Box paddingX={3} paddingBottom={2}>
-                    <Text size="small" style={{ color: '#6b7280' }}>Modify mapping — {activeTable.name}</Text>
+                    <Text size="small" style={{ color: '#6b7280' }}>Modify mapping - {activeTable.name}</Text>
                 </Box>
             )}
         </Box>
@@ -248,6 +234,8 @@ function AppHeader({ mode, activeTableId, createStep, onSettingsClick, onCancelC
 function MapsembleApp() {
     const globalConfig = useGlobalConfig();
     const base = useBase();
+    const cursor = useCursor();
+    const cursorTableId = cursor.activeTableId;
     const [migrated, setMigrated] = useState(false);
     const [mode, setMode] = useState(null);
     const [createStep, setCreateStep] = useState(1);
@@ -258,13 +246,31 @@ function MapsembleApp() {
     const [pendingFieldConfig, setPendingFieldConfig] = useState(null);
     const [showSetupModal, setShowSetupModal] = useState(false);
     const [showResyncNotice, setShowResyncNotice] = useState(false);
+    const [webhookNotice, setWebhookNotice] = useState(null);
     const [webhookModal, setWebhookModal] = useState(null); // null | { tableId, mapId }
     const [previewModal, setPreviewModal] = useState(null); // null | { mapId, mapLabel }
+
+    const hasToken = !!globalConfig.get('token');
+    const featureFlags = globalConfig.get('featureFlags');
+    const hasGeocoding = featureFlags != null && typeof featureFlags === 'object' && featureFlags['geocoding'] === true;
 
     useEffect(() => {
         migrateIfNeeded(globalConfig)
             .then(() => {
                 setMode('home');
+
+                // Best-effort: refresh feature flags on block open
+                if (hasToken) {
+                    const config = {
+                        url: MAPSEMBLE_URL,
+                        clientId: globalConfig.get('clientId'),
+                        clientSecret: globalConfig.get('clientSecret'),
+                        token: globalConfig.get('token'),
+                    };
+                    fetchMe(config, (newToken) => globalConfig.setAsync('token', newToken))
+                        .then((me) => globalConfig.setAsync('featureFlags', me.featureFlags || []))
+                        .catch(() => {});
+                }
 
                 // Best-effort: refresh all stored Airtable webhooks on block open
                 if (hasToken) {
@@ -272,7 +278,7 @@ function MapsembleApp() {
                     if (pat) {
                         const tableConfigs = globalConfig.get('tableConfigs') || {};
                         for (const tableConfig of Object.values(tableConfigs)) {
-                            // One webhook per table — stored at table level
+                            // One webhook per table - stored at table level
                             const baseId = (tableConfig.maps || []).find(m => m.airtableBaseId)?.airtableBaseId;
                             const webhookId = tableConfig.airtableWebhookId
                                 // backward-compat: fall back to per-map if table-level not yet set
@@ -300,7 +306,7 @@ function MapsembleApp() {
         );
     }
 
-    // Seed functions — read existing config from globalConfig for a tableId
+    // Seed functions - read existing config from globalConfig for a tableId
     function seedLocConfig(tableId) {
         const tc = globalConfig.get(['tableConfigs', tableId]) || {};
         return {
@@ -333,8 +339,10 @@ function MapsembleApp() {
     async function startSync(tableId, mapId) {
         setActiveTableId(tableId);
         setActiveMapId(mapId);
-        await globalConfig.setAsync('activeMapId', mapId);
-        await globalConfig.setAsync('selectedTableId', tableId);
+        if (globalConfig.hasPermissionToSet()) {
+            await globalConfig.setAsync('activeMapId', mapId);
+            await globalConfig.setAsync('selectedTableId', tableId);
+        }
         setMode('sync');
     }
 
@@ -386,7 +394,7 @@ function MapsembleApp() {
             const mapEntry = (tc.maps || []).find(m => m.mapId === newMapId);
             if (mapEntry?.airtableBaseId) {
                 performWebhookRegistration(activeTableId, newMapId, mapEntry.airtableBaseId)
-                    .catch(err => console.warn('[Mapsemble] Webhook auto-registration failed:', err.message));
+                    .catch(() => setWebhookNotice('Auto-sync could not be enabled. You can set it up later from the webhook panel.'));
             }
         }
     }
@@ -431,6 +439,9 @@ function MapsembleApp() {
                         allowMultiple: meta.remoteType === 'multi_select',
                     };
                 }
+                if (meta.remoteType === 'image') {
+                    fieldDef.config = { allowMultiple: true };
+                }
                 return fieldDef;
             });
             fields.unshift({
@@ -440,6 +451,23 @@ function MapsembleApp() {
                 weight:   -1,
                 required: false,
             });
+
+            // Add geocode field to schema when using address format
+            const locationColumnName = pendingLocConfig?.locationColumn
+                ? (table.getFieldByIdIfExists(pendingLocConfig.locationColumn)?.name || '')
+                : '';
+            const geocodeFieldSlug = pendingLocConfig?.locationFormat === 'address' && locationColumnName
+                ? toSlug(locationColumnName)
+                : '';
+            if (geocodeFieldSlug) {
+                fields.push({
+                    slug: geocodeFieldSlug,
+                    type: 'text',
+                    label: locationColumnName,
+                    weight: fields.length,
+                    required: false,
+                });
+            }
 
             const config = {
                 url:          MAPSEMBLE_URL,
@@ -456,7 +484,7 @@ function MapsembleApp() {
                     activeMapId,
                     {
                         fields,
-                        config: { remoteField: '_airtable_id' },
+                        config: { remoteField: '_airtable_id', ...(geocodeFieldSlug ? { geocodeField: geocodeFieldSlug } : {}) },
                         externalSource: 'airtable',
                         dataSource: {
                             config: {
@@ -472,11 +500,7 @@ function MapsembleApp() {
                     config,
                     (newToken) => globalConfig.setAsync('token', newToken),
                 );
-            } catch (err) {
-                // eslint-disable-next-line no-console
-                console.error('[Mapsemble] Failed to update map fields:', err);
-                throw err;
-            }
+            } catch (err) { throw err; }
 
             // Best-effort: auto-register webhook if not yet registered for this table
             const updatedTableConfig = globalConfig.get(['tableConfigs', activeTableId]) || {};
@@ -487,8 +511,7 @@ function MapsembleApp() {
                     try {
                         await performWebhookRegistration(activeTableId, activeMapId, mapEntry.airtableBaseId);
                     } catch (webhookErr) {
-                        // eslint-disable-next-line no-console
-                        console.warn('[Mapsemble] Webhook auto-registration on modify failed:', webhookErr.message);
+                        setWebhookNotice('Auto-sync could not be enabled. You can set it up later from the webhook panel.');
                     }
                 }
             }
@@ -522,7 +545,10 @@ function MapsembleApp() {
             },
         );
         if (!dsRes.ok) {
-            throw new Error(`Failed to fetch webhook info (${dsRes.status})`);
+            const msg = dsRes.status === 404
+                ? 'Webhook endpoint not found on Mapsemble - the map may not support auto-sync yet.'
+                : `Failed to fetch webhook info (${dsRes.status})`;
+            throw new Error(msg);
         }
         const dsData = await dsRes.json();
         const rawNotificationUrl = dsData.notificationUrl;
@@ -551,7 +577,7 @@ function MapsembleApp() {
             body: JSON.stringify({ mapId, baseId, tableId, webhookId, pat }),
         });
 
-        // Store webhook at table level — shared by all maps for this table
+        // Store webhook at table level - shared by all maps for this table
         await globalConfig.setAsync(['tableConfigs', tableId, 'airtableWebhookId'], webhookId);
 
         return webhookId;
@@ -568,6 +594,9 @@ function MapsembleApp() {
         ? { ...pendingLocConfig, ...pendingFieldConfig }
         : null;
 
+    const tableMismatch = (mode === 'create' || mode === 'modify') && cursorTableId !== activeTableId;
+    const mismatchTableName = activeTableId ? (base.getTableByIdIfExists(activeTableId)?.name ?? 'unknown table') : 'unknown table';
+
     // ── Setup modal overlay ─────────────────────────────────────────────────
     // (rendered on top of main layout when showSetupModal is true)
 
@@ -583,6 +612,31 @@ function MapsembleApp() {
             />
 
             <Box flex="auto" overflow="hidden" style={{ overflowY: 'auto' }}>
+              <Box style={{ maxWidth: 720, marginLeft: 'auto', marginRight: 'auto' }}>
+                {webhookNotice && (
+                    <Box padding={2} margin={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                        <Box display="flex" justifyContent="space-between" alignItems="center">
+                            <Text size="small" className="text-amber-700">{webhookNotice}</Text>
+                            <Button onClick={() => setWebhookNotice(null)} variant="default" size="small">
+                                Dismiss
+                            </Button>
+                        </Box>
+                    </Box>
+                )}
+                {tableMismatch && (
+                    <Box padding={3} display="flex" flexDirection="column" alignItems="center" justifyContent="center" style={{ minHeight: 200 }}>
+                        <Text size="default" marginBottom={2}>
+                            You are <strong>{mode === 'create' ? 'creating' : 'modifying'}</strong> a map for <strong>{mismatchTableName}</strong>.
+                        </Text>
+                        <Text size="small" textColor="light" marginBottom={3}>
+                            Select the table to continue.
+                        </Text>
+                        <Button onClick={goHome} variant="default" size="small">
+                            Cancel
+                        </Button>
+                    </Box>
+                )}
+
                 {mode === 'home' && (
                     <HomeScreen
                         onCreateNew={startCreate}
@@ -596,16 +650,17 @@ function MapsembleApp() {
                     />
                 )}
 
-                {mode === 'create' && createStep === 1 && (
+                {!tableMismatch && mode === 'create' && createStep === 1 && (
                     <LocationMapper
                         tableId={activeTableId}
                         initialConfig={pendingLocConfig || seedLocConfig(activeTableId)}
                         onComplete={handleLocationComplete}
                         onCancel={goHome}
+                        hasGeocoding={hasGeocoding}
                     />
                 )}
 
-                {mode === 'create' && createStep === 2 && (
+                {!tableMismatch && mode === 'create' && createStep === 2 && (
                     <FieldMapper
                         tableId={activeTableId}
                         initialConfig={seedFieldConfig(activeTableId)}
@@ -615,7 +670,7 @@ function MapsembleApp() {
                     />
                 )}
 
-                {mode === 'create' && createStep === 3 && (
+                {!tableMismatch && mode === 'create' && createStep === 3 && (
                     <MapBuilder
                         tableId={activeTableId}
                         pendingConfig={combinedPendingConfig}
@@ -624,7 +679,7 @@ function MapsembleApp() {
                     />
                 )}
 
-                {mode === 'create' && createStep === 4 && (
+                {!tableMismatch && mode === 'create' && createStep === 4 && (
                     <SyncPanel
                         tableId={activeTableId}
                         mapId={activeMapId}
@@ -635,7 +690,7 @@ function MapsembleApp() {
                     />
                 )}
 
-                {mode === 'create' && createStep === 5 && (
+                {!tableMismatch && mode === 'create' && createStep === 5 && (
                     <CreatePreviewStep
                         mapId={activeMapId}
                         mapLabel={(() => {
@@ -661,16 +716,17 @@ function MapsembleApp() {
                     />
                 )}
 
-                {mode === 'modify' && modifyStep === 1 && (
+                {!tableMismatch && mode === 'modify' && modifyStep === 1 && (
                     <LocationMapper
                         tableId={activeTableId}
                         initialConfig={pendingLocConfig || seedLocConfig(activeTableId)}
                         onComplete={handleModifyLocationComplete}
                         onCancel={goHome}
+                        hasGeocoding={hasGeocoding}
                     />
                 )}
 
-                {mode === 'modify' && modifyStep === 2 && (
+                {!tableMismatch && mode === 'modify' && modifyStep === 2 && (
                     <FieldMapper
                         tableId={activeTableId}
                         initialConfig={seedFieldConfig(activeTableId)}
@@ -679,6 +735,7 @@ function MapsembleApp() {
                         onBack={() => setModifyStep(1)}
                     />
                 )}
+              </Box>
             </Box>
 
             {showSetupModal && (
@@ -688,6 +745,11 @@ function MapsembleApp() {
                     left={0}
                     right={0}
                     bottom={0}
+                    tabIndex={0}
+                    ref={(el) => el && el.focus()}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Escape') setShowSetupModal(false);
+                    }}
                     style={{
                         backgroundColor: 'rgba(0,0,0,0.4)',
                         zIndex: 100,
@@ -695,6 +757,7 @@ function MapsembleApp() {
                         alignItems: 'flex-start',
                         justifyContent: 'center',
                         paddingTop: 40,
+                        outline: 'none',
                     }}
                 >
                     <Box
@@ -704,8 +767,28 @@ function MapsembleApp() {
                             boxShadow: '0 4px 24px rgba(0,0,0,0.15)',
                             width: '90%',
                             maxWidth: 400,
+                            position: 'relative',
                         }}
                     >
+                        <button
+                            onClick={() => setShowSetupModal(false)}
+                            style={{
+                                position: 'absolute',
+                                top: 8,
+                                right: 8,
+                                background: 'none',
+                                border: 'none',
+                                cursor: 'pointer',
+                                padding: 4,
+                                lineHeight: 1,
+                                fontSize: 18,
+                                color: '#6b7280',
+                                zIndex: 1,
+                            }}
+                            aria-label="Close"
+                        >
+                            ✕
+                        </button>
                         <Setup
                             onComplete={() => {
                                 setShowSetupModal(false);
@@ -718,7 +801,6 @@ function MapsembleApp() {
                                 if (tableId) startCreate(tableId);
                             }}
                             onDisconnect={globalConfig.get('token') ? () => {
-                                setShowSetupModal(false);
                                 setMode('home');
                             } : undefined}
                         />

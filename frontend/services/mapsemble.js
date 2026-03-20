@@ -15,9 +15,8 @@
  * to persist a freshly-exchanged token back to globalConfig.
  */
 
-export const MAPSEMBLE_URL = process.env.NODE_ENV === 'development'
-    ? 'https://app.mapsemble.ddev.site'
-    : 'https://app.mapsemble.com';
+export const MAPSEMBLE_URL = process.env.MAPSEMBLE_URL || 'https://app.mapsemble.com';
+
 
 // Set NGROK_URL in .env (or environment) to route webhook registrations through ngrok.
 // e.g. NGROK_URL=https://postelementary-juliet-crackly.ngrok-free.dev
@@ -25,7 +24,7 @@ export const NGROK_URL = process.env.NGROK_URL || null;
 
 /**
  * Poll the Mapsemble authorization endpoint for credentials.
- * Used by the popup connection flow — no authentication required.
+ * Used by the popup connection flow - no authentication required.
  * Returns { found, clientId, clientSecret } or { found: false }.
  */
 export async function pollCredentials(state) {
@@ -141,8 +140,6 @@ export async function fetchMe(config, setToken) {
  * Returns the created map object { id, label, ... }.
  */
 export async function createMap(payload, config, setToken) {
-    // eslint-disable-next-line no-console
-    console.log('[Mapsemble] POST /api/v1/maps body:', JSON.stringify(payload, null, 2));
     const res = await apiFetch(
         '/api/v1/maps',
         {
@@ -160,8 +157,6 @@ export async function createMap(payload, config, setToken) {
             if (body.message) {
                 message = body.message;
             }
-            // eslint-disable-next-line no-console
-            console.log('[Mapsemble] POST /api/v1/maps error response:', JSON.stringify(body, null, 2));
             if (body.errors) {
                 const details = Object.entries(body.errors)
                     .map(([field, msgs]) => {
@@ -171,7 +166,7 @@ export async function createMap(payload, config, setToken) {
                         return `${field}: ${val}`;
                     })
                     .join(' | ');
-                message = body.message ? `${body.message} — ${details}` : details;
+                message = body.message ? `${body.message} - ${details}` : details;
             }
         } catch (_e) {
             const text = await res.text().catch(() => '');
@@ -189,55 +184,66 @@ export async function createMap(payload, config, setToken) {
  * Returns the API response body.
  */
 export async function syncFeatures(mapId, features, config, setToken) {
-    const requestBody = {
-        type: 'FeatureCollection',
-        features,
-        remoteField: '_airtable_id',
-    };
-    // eslint-disable-next-line no-console
-    console.log('syncFeatures request body:', JSON.stringify(requestBody, null, 2));
-    const res = await apiFetch(
-        `/api/v1/maps/${mapId}/features`,
-        {
-            method: 'POST',
-            body: JSON.stringify(requestBody),
-        },
-        config,
-        setToken,
-    );
-
-    if (res.status === 404) {
-        const e = new Error('Map not found — it may have been deleted in Mapsemble (404)');
-        e.code = 'MAP_NOT_FOUND';
-        throw e;
+    const BATCH_SIZE = 500;
+    const batches = [];
+    for (let i = 0; i < features.length; i += BATCH_SIZE) {
+        batches.push(features.slice(i, i + BATCH_SIZE));
     }
 
-    if (!res.ok) {
-        let message = `Feature sync failed (${res.status})`;
-        try {
-            const body = await res.json();
-            if (body.message) {
-                message = body.message;
-            }
-            if (body.errors) {
-                const details = Object.entries(body.errors)
-                    .map(([field, msgs]) => {
-                        const val = Array.isArray(msgs)
-                            ? msgs.map(m => (typeof m === 'string' ? m : JSON.stringify(m))).join(', ')
-                            : (typeof msgs === 'string' ? msgs : JSON.stringify(msgs));
-                        return `${field}: ${val}`;
-                    })
-                    .join(' | ');
-                message = body.message ? `${body.message} — ${details}` : details;
-            }
-        } catch (_e) {
-            const text = await res.text().catch(() => '');
-            if (text) message = `${message}: ${text}`;
+    let lastResult;
+    for (const batch of batches) {
+        const requestBody = {
+            type: 'FeatureCollection',
+            features: batch,
+            remoteField: '_airtable_id',
+        };
+        const res = await apiFetch(
+            `/api/v1/maps/${mapId}/features`,
+            {
+                method: 'POST',
+                body: JSON.stringify(requestBody),
+            },
+            config,
+            setToken,
+        );
+
+        if (res.status === 404) {
+            const e = new Error('Map not found - it may have been deleted in Mapsemble (404)');
+            e.code = 'MAP_NOT_FOUND';
+            throw e;
         }
-        throw new Error(message);
+
+        if (!res.ok) {
+            console.log('[syncFeatures] Response status:', res.status);
+            let message = `Feature sync failed (${res.status})`;
+            try {
+                const body = await res.json();
+                console.log('[syncFeatures] Response body:', body);
+                if (body.message) {
+                    message = body.message;
+                }
+                if (body.errors) {
+                    const details = Object.entries(body.errors)
+                        .map(([field, msgs]) => {
+                            const val = Array.isArray(msgs)
+                                ? msgs.map(m => (typeof m === 'string' ? m : JSON.stringify(m))).join(', ')
+                                : (typeof msgs === 'string' ? msgs : JSON.stringify(msgs));
+                            return `${field}: ${val}`;
+                        })
+                        .join(' | ');
+                    message = body.message ? `${body.message} - ${details}` : details;
+                }
+            } catch (_e) {
+                const text = await res.text().catch(() => '');
+                if (text) message = `${message}: ${text}`;
+            }
+            throw new Error(message);
+        }
+
+        lastResult = await res.json();
     }
 
-    return res.json();
+    return lastResult;
 }
 
 /**
@@ -252,8 +258,6 @@ export async function putFeatures(mapId, features, config, setToken) {
         features,
         remoteField: '_airtable_id',
     };
-    // eslint-disable-next-line no-console
-    console.log(`[Mapsemble] PUT /api/v1/maps/${mapId}/features (${features.length} features)`, JSON.stringify(requestBody, null, 2));
     const res = await apiFetch(
         `/api/v1/maps/${mapId}/features`,
         {
@@ -265,7 +269,7 @@ export async function putFeatures(mapId, features, config, setToken) {
     );
 
     if (res.status === 404) {
-        const e = new Error('Map not found — it may have been deleted in Mapsemble (404)');
+        const e = new Error('Map not found - it may have been deleted in Mapsemble (404)');
         e.code = 'MAP_NOT_FOUND';
         throw e;
     }
@@ -284,7 +288,7 @@ export async function putFeatures(mapId, features, config, setToken) {
                         return `${field}: ${val}`;
                     })
                     .join(' | ');
-                message = body.message ? `${body.message} — ${details}` : details;
+                message = body.message ? `${body.message} - ${details}` : details;
             }
         } catch (_e) {
             const text = await res.text().catch(() => '');
@@ -301,14 +305,12 @@ export async function putFeatures(mapId, features, config, setToken) {
  * Requires the backend to support ?page=N&per_page=500.
  * Returns a Set<string> of all _airtable_id values currently on the map.
  */
-export async function fetchAllMapAirtableIds(mapId, config, setToken) {
+export async function fetchAllMapAirtableIds(mapId, config, setToken, onProgress) {
     const ids = new Set();
     let page = 1;
     const perPage = 500;
 
     while (true) {
-        // eslint-disable-next-line no-console
-        console.log(`[Mapsemble] GET /api/v1/maps/${mapId}/features?page=${page}&per_page=${perPage}`);
         const res = await apiFetch(
             `/api/v1/maps/${mapId}/features?page=${page}&per_page=${perPage}`,
             { method: 'GET' },
@@ -317,7 +319,7 @@ export async function fetchAllMapAirtableIds(mapId, config, setToken) {
         );
 
         if (res.status === 404) {
-            const e = new Error('Map not found — it may have been deleted in Mapsemble (404)');
+            const e = new Error('Map not found - it may have been deleted in Mapsemble (404)');
             e.code = 'MAP_NOT_FOUND';
             throw e;
         }
@@ -333,11 +335,14 @@ export async function fetchAllMapAirtableIds(mapId, config, setToken) {
 
         const data = await res.json();
         const features = data?.featureCollection?.features ?? [];
+        const total = data?.featureCollection?.properties?.total ?? null;
 
         for (const f of features) {
             const id = f?.properties?._airtable_id;
             if (id) ids.add(id);
         }
+
+        if (onProgress) onProgress(ids.size, total);
 
         if (features.length < perPage) break;
         page++;
@@ -361,8 +366,6 @@ export async function deleteFeaturesByAirtableIds(mapId, airtableIds, config, se
         })),
     };
 
-    // eslint-disable-next-line no-console
-    console.log(`[Mapsemble] DELETE /api/v1/maps/${mapId}/features (${airtableIds.length} ids)`, JSON.stringify(requestBody, null, 2));
     const res = await apiFetch(
         `/api/v1/maps/${mapId}/features`,
         {
@@ -390,7 +393,7 @@ export async function deleteFeaturesByAirtableIds(mapId, airtableIds, config, se
                         return `${field}: ${val}`;
                     })
                     .join(' | ');
-                message = body.message ? `${body.message} — ${details}` : details;
+                message = body.message ? `${body.message} - ${details}` : details;
             }
         } catch (_e) {
             const text = await res.text().catch(() => '');
@@ -406,8 +409,6 @@ export async function deleteFeaturesByAirtableIds(mapId, airtableIds, config, se
  * Returns the updated map object or throws.
  */
 export async function updateMap(mapId, payload, config, setToken) {
-  console.log(`[Mapsemble] PATCH /api/v1/maps/${mapId} body:`, JSON.stringify(payload, null, 2));
-
   const res = await apiFetch(
         `/api/v1/maps/${mapId}`,
         {
@@ -432,7 +433,7 @@ export async function updateMap(mapId, payload, config, setToken) {
                         return `${field}: ${val}`;
                     })
                     .join(' | ');
-                message = body.message ? `${body.message} — ${details}` : details;
+                message = body.message ? `${body.message} - ${details}` : details;
             }
         } catch (_e) {
             const text = await res.text().catch(() => '');

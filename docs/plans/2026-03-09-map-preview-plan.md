@@ -250,9 +250,9 @@ Run: `block run`
 
 1. Open the Airtable base with the block installed
 2. Confirm a "Preview" button appears on each map card in HomeScreen
-3. Click "Preview" — block should go fullscreen and show the map in an iframe
+3. Click "Preview" - block should go fullscreen and show the map in an iframe
 4. Verify the "Open in Mapsemble" link works (opens new tab)
-5. Click "Close" — block should exit fullscreen and return to HomeScreen
+5. Click "Close" - block should exit fullscreen and return to HomeScreen
 6. Verify "Preview" is disabled for maps marked as missing
 
 **Step 3: Final commit if any adjustments needed**
