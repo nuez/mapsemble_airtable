@@ -44,7 +44,15 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
     const table = base.getTableByIdIfExists(tableId);
     const fields = table ? table.fields : [];
 
-    const [locationMode, setLocationMode] = useState(initialConfig?.locationMode || 'dual');
+    const defaultLocationMode = (() => {
+        if (initialConfig?.locationMode) return initialConfig.locationMode;
+        const latPatterns = /^(lat|latitude)$/i;
+        const lngPatterns = /^(lon|lng|longitude)$/i;
+        const hasLat = fields.some(f => latPatterns.test(f.name));
+        const hasLng = fields.some(f => lngPatterns.test(f.name));
+        return (hasLat && hasLng) ? 'dual' : 'single';
+    })();
+    const [locationMode, setLocationMode] = useState(defaultLocationMode);
     const [latField, setLatField] = useState(initialConfig?.latField || '');
     const [lngField, setLngField] = useState(initialConfig?.lngField || '');
     const [locationColumn, setLocationColumn] = useState(initialConfig?.locationColumn || '');

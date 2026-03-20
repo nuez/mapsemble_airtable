@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
     useBase,
     useRecords,
@@ -12,7 +12,7 @@ import {
 } from '@airtable/blocks/ui';
 import { createMap, updateMap, MAPSEMBLE_URL, NGROK_URL } from '../services/mapsemble';
 import { buildSlugMap, toSlug } from '../services/geojson';
-import { registerAirtableWebhook } from '../services/airtable';
+import { registerAirtableWebhook, listAirtableWebhooks, deleteAirtableWebhook } from '../services/airtable';
 
 function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, onBack }) {
     const globalConfig = useGlobalConfig();
@@ -40,6 +40,12 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
     const [error, setError] = useState('');
     const [webhookWarning, setWebhookWarning] = useState('');
     const [deletedFields, setDeletedFields] = useState([]);
+
+    const isMounted = useRef(true);
+    useEffect(() => {
+        isMounted.current = true;
+        return () => { isMounted.current = false; };
+    }, []);
 
     function getConfig() {
         return {
@@ -200,6 +206,7 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             const map = await createMap(payload, cfg, setToken);
 
             // --- Step 2: Generate AI templates ---
+            if (!isMounted.current) return;
             setBuildStep('generating');
             await updateMap(map.id, {
                 config: { generateTemplates: true },
@@ -208,15 +215,14 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             // Attempt automatic webhook registration if a PAT is configured
             const pat = globalConfig.get('airtablePat');
             const existingConfig = globalConfig.get(['tableConfigs', tableId]) || {};
-            // One webhook per table - check if one already exists before creating another
-            const existingTableWebhookId = existingConfig.airtableWebhookId || null;
-            let airtableWebhookId = existingTableWebhookId;
+            let airtableWebhookId = null;
 
             if (pat && baseId && tableId) {
                 try {
                     // 1. Fetch the webhook token / notification URL from Mapsemble
+                    console.log(`[Mapsemble] Fetching webhook notification URL for map ${map.id}`);
                     const dsRes = await fetch(
-                        `${MAPSEMBLE_URL}/api/v1/webhook/airtable/${map.id}`,
+                        `${MAPSEMBLE_URL}/api/v1/webhook/airtable/${map.id}/data`,
                         {
                             method: 'GET',
                             headers: {
@@ -236,13 +242,25 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                             NGROK_URL.replace(/\/$/, ''),
                           )
                         : rawNotificationUrl;
+                    console.log(`[Mapsemble] notificationUrl: ${notificationUrl}`);
 
-                    if (!existingTableWebhookId) {
-                        // 2. No existing table webhook - register a new one with Airtable
-                        airtableWebhookId = await registerAirtableWebhook(baseId, tableId, notificationUrl, pat);
+                    // 2. Delete any existing Airtable webhooks scoped to this table
+                    const existingWebhooks = await listAirtableWebhooks(baseId, pat);
+                    const tableWebhooks = existingWebhooks.filter(
+                        w => w.specification?.options?.filters?.recordChangeScope === tableId,
+                    );
+                    console.log(`[Mapsemble] Deleting ${tableWebhooks.length} existing Airtable webhook(s) for table ${tableId}`);
+                    for (const w of tableWebhooks) {
+                        await deleteAirtableWebhook(baseId, w.id, pat);
                     }
 
-                    // 3. Register this map <-> webhook with the Mapsemble backend
+                    // 3. Register a fresh webhook with Airtable
+                    console.log(`[Mapsemble] Registering Airtable webhook for table ${tableId}`);
+                    airtableWebhookId = await registerAirtableWebhook(baseId, tableId, notificationUrl, pat);
+                    console.log(`[Mapsemble] Airtable webhook registered: ${airtableWebhookId}`);
+
+                    // 4. Register this map <-> webhook with the Mapsemble backend
+                    console.log(`[Mapsemble] Registering webhook with Mapsemble backend`);
                     const registerRes = await fetch(`${MAPSEMBLE_URL}/api/v1/webhook/airtable/register`, {
                         method: 'POST',
                         headers: {
@@ -261,7 +279,8 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                         throw new Error(`Mapsemble webhook registration failed (${registerRes.status})`);
                     }
                 } catch (webhookErr) {
-                    setWebhookWarning('Auto-sync could not be enabled. You can set it up later from the sync panel.');
+                    console.warn('[Mapsemble] Webhook auto-registration failed:', webhookErr);
+                    if (isMounted.current) setWebhookWarning('Auto-sync could not be enabled. You can set it up later from the sync panel.');
                 }
             }
 
@@ -274,17 +293,17 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             };
             await globalConfig.setAsync(['tableConfigs', tableId, 'maps'],
                 [...(existingConfig.maps || []), newEntry]);
-            // Store webhook at table level (skip if it was already there)
-            if (airtableWebhookId && !existingTableWebhookId) {
+            // Store webhook at table level
+            if (airtableWebhookId) {
                 await globalConfig.setAsync(['tableConfigs', tableId, 'airtableWebhookId'], airtableWebhookId);
             }
             await globalConfig.setAsync('activeMapId', map.id);
 
             if (onComplete) onComplete(map.id);
         } catch (err) {
-            setError(err.message);
+            if (isMounted.current) setError(err.message);
         } finally {
-            setBuilding(false);
+            if (isMounted.current) setBuilding(false);
         }
     }
 
