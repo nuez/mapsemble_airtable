@@ -814,6 +814,7 @@ function MapsembleApp() {
                             showHeader={false}
                             hasGeocoding={hasGeocoding}
                             isMapActive={mapEntry?.active === true}
+                            onConnect={() => setShowSetupModal(true)}
                         />
                     );
                 })()}
@@ -863,6 +864,7 @@ function MapsembleApp() {
                             skipConfirm={true}
                             hasGeocoding={hasGeocoding}
                             isMapActive={mapEntry?.active === true}
+                            onConnect={() => setShowSetupModal(true)}
                         />
                     );
                 })()}

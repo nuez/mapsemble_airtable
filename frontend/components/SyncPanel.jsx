@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
     useBase,
     useRecords,
@@ -18,11 +18,12 @@ import {
 } from '../services/mapsemble';
 
 function getBatchSize(total) {
-    return Math.min(2000, Math.max(50, Math.ceil(total / 10)));
+    return Math.min(1000, Math.max(50, Math.ceil(total / 10)));
 }
+const MIN_BATCH_SIZE = 25;
 const MAX_ERRORS = 10;
 
-function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, skipConfirm, hasWebhook, webhookFailed, hasGeocoding, isMapActive }) {
+function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, skipConfirm, hasWebhook, webhookFailed, hasGeocoding, isMapActive, onConnect }) {
     const globalConfig = useGlobalConfig();
     const canWrite = globalConfig.hasPermissionToSet();
     const neededFieldIds = (() => {
@@ -51,6 +52,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
 
     const [deletedFields, setDeletedFields] = useState([]);
     const [confirmSync, setConfirmSync] = useState(false);
+    const [unauthorized, setUnauthorized] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [syncDone, setSyncDone] = useState(false);
     const [progress, setProgress] = useState(null); // { phase: 'upsert'|'prune_read'|'prune_delete', done, total }
@@ -59,6 +61,15 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
     const [limitInfo, setLimitInfo] = useState(null); // { limit, current, totalRecords }
 
     const abortRef = useRef(false);
+    const autoStarted = useRef(false);
+
+    useEffect(() => {
+        if (skipConfirm && !autoStarted.current && canWrite && mapId && !geocodingBlocked) {
+            autoStarted.current = true;
+            handleSync();
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     function getConfig() {
         return {
@@ -122,7 +133,9 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
         setErrors([]);
         setMapNotFound(false);
         setLimitInfo(null);
+        setUnauthorized(false);
         let mapGone = false;
+        let wasUnauthorized = false;
 
         const fieldMapping = getFieldMapping();
         const config = getConfig();
@@ -135,6 +148,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
         const total = features.length;
 
         let limitReached = false;
+        let hadAnyError = false;
 
         // Pre-fetch existing map IDs for pruning (skip on first sync - nothing to prune)
         let mapIds = null;
@@ -145,20 +159,22 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
                     setProgress({ phase: 'prune_read', done: count, total: total || 0 });
                 });
             } catch (err) {
-                if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
-                else { addError(`Could not fetch existing map features for cleanup: ${err.message}`); }
+                if (err.code === 'UNAUTHORIZED') { wasUnauthorized = true; }
+                else if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
+                else { addError(`Could not fetch existing map features for cleanup: ${err.message}`); hadAnyError = true; }
             }
         }
 
         // Phase A - Upsert
         let upsertHadErrors = false;
-        const upsertBatchSize = getBatchSize(total);
+        let dynamicBatchSize = getBatchSize(total);
+        let i = 0;
         setProgress({ phase: 'upsert', done: 0, total });
 
-        for (let i = 0; i < total; i += upsertBatchSize) {
-            if (abortRef.current || limitReached) break;
+        while (i < total) {
+            if (abortRef.current || limitReached || wasUnauthorized) break;
 
-            const batch = features.slice(i, i + upsertBatchSize);
+            const batch = features.slice(i, i + dynamicBatchSize);
             try {
                 const result = await syncFeatures(mapId, batch, config, setToken);
                 const limitFail = (result?.failed || []).find(
@@ -168,13 +184,29 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
                     limitReached = true;
                     setLimitInfo({ limit: limitFail.limit, current: limitFail.current, totalRecords: total });
                 }
+                i += dynamicBatchSize;
             } catch (err) {
-                if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); upsertHadErrors = true; }
-                else { addError(`Batch ${Math.floor(i / upsertBatchSize) + 1}: ${err.message}`); upsertHadErrors = true; }
+                if (err.code === 'BATCH_TOO_LARGE' && dynamicBatchSize > MIN_BATCH_SIZE) {
+                    // Batch too large — halve the size and retry the same batch
+                    dynamicBatchSize = Math.max(MIN_BATCH_SIZE, Math.floor(dynamicBatchSize / 2));
+                    continue;
+                }
+                // Non-recoverable error — log and skip this batch
+                if (err.code === 'UNAUTHORIZED') {
+                    wasUnauthorized = true; upsertHadErrors = true;
+                } else if (err.code === 'MAP_NOT_FOUND') {
+                    mapGone = true; setMapNotFound(true); upsertHadErrors = true;
+                } else {
+                    const batchLabel = `records ${i + 1}–${Math.min(i + dynamicBatchSize, total)}`;
+                    addError(`Batch (${batchLabel}): ${err.message}`);
+                    upsertHadErrors = true;
+                    hadAnyError = true;
+                }
+                i += dynamicBatchSize;
             }
 
             await new Promise(r => setTimeout(r, 200));
-            setProgress({ phase: 'upsert', done: Math.min(i + upsertBatchSize, total), total });
+            setProgress({ phase: 'upsert', done: Math.min(i, total), total });
         }
 
         // Phase B - Prune removed records (skip if aborted, upsert had errors, limit reached, or no pre-fetched IDs)
@@ -194,6 +226,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
                     try {
                         await deleteFeaturesByAirtableIds(mapId, batch, config, setToken);
                     } catch (err) {
+                        if (err.code === 'UNAUTHORIZED') { wasUnauthorized = true; break; }
                         addError(`Delete batch ${Math.floor(i / deleteBatchSize) + 1}: ${err.message}`);
                     }
                     await new Promise(r => setTimeout(r, 200));
@@ -203,6 +236,14 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
             }
         } else if (upsertHadErrors) {
             addError('Removal of deleted records skipped - re-sync after fixing errors above.');
+            hadAnyError = true;
+        }
+
+        if (wasUnauthorized) {
+            setUnauthorized(true);
+            setSyncing(false);
+            setProgress(null);
+            return;
         }
 
         if (!abortRef.current && !mapGone) {
@@ -217,7 +258,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
         // Auto-advance to next step after successful sync (wizard mode)
         if (!abortRef.current && !mapGone && onNext) {
             onNext();
-        } else if (!abortRef.current && !mapGone && !onNext) {
+        } else if (!abortRef.current && !mapGone && !onNext && !limitReached && !hadAnyError) {
             setSyncDone(true);
         }
     }
@@ -286,15 +327,62 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
                         )}
                     </Box>
                 )}
+                {errors.length > 0 && (
+                    <Box width="80%" marginTop={3}>
+                        {errors.map((e, i) => (
+                            <Box key={i} padding={2} marginBottom={1} className="bg-red-50 border border-red-200 rounded-md">
+                                <Text size="small" className="text-red-700">{e.msg}</Text>
+                            </Box>
+                        ))}
+                    </Box>
+                )}
                 <Button
                     onClick={() => { abortRef.current = true; }}
                     variant="default"
                     size="small"
-                    marginTop={1}
+                    marginTop={2}
                 >
                     Cancel
                 </Button>
                 <style>{`@keyframes mapsemble-spin { to { transform: rotate(360deg); } }`}</style>
+            </Box>
+        );
+    }
+
+    if (unauthorized) {
+        return (
+            <Box
+                display="flex"
+                flexDirection="column"
+                alignItems="center"
+                justifyContent="center"
+                padding={3}
+                style={{ height: '100%', minHeight: 300 }}
+            >
+                <Box
+                    style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: '50%',
+                        backgroundColor: '#fee2e2',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginBottom: 16,
+                        fontSize: 24,
+                    }}
+                >
+                    ✕
+                </Box>
+                <Heading size="small" marginBottom={1}>Session expired</Heading>
+                <Text size="small" textColor="light" marginBottom={3} style={{ textAlign: 'center' }}>
+                    Your connection to Mapsemble is no longer valid. Please reconnect to continue.
+                </Text>
+                {onConnect && (
+                    <Button onClick={onConnect} variant="primary">
+                        Reconnect to Mapsemble
+                    </Button>
+                )}
             </Box>
         );
     }
@@ -384,8 +472,10 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
                     </Text>
                     <Text size="small" className="text-amber-700 mt-1">
                         Your plan allows up to {limitInfo.limit} locations per map.
-                        {limitInfo.totalRecords} records were found in Airtable but only {limitInfo.limit} were synced.
-                        Upgrade your plan to sync all records.
+                        {limitInfo.totalRecords} records were found in Airtable but only {limitInfo.limit} were synced.{' '}
+                        <a href={`${MAPSEMBLE_URL}/map/${mapId}`} target="_blank" rel="noreferrer" className="text-amber-800 underline font-medium">
+                            Upgrade to increase limit
+                        </a>
                     </Text>
                 </Box>
             )}
@@ -553,7 +643,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
     );
 }
 
-export default function SyncPanel({ tableId, mapId, onBack, onNext, showHeader, skipConfirm, hasWebhook, webhookFailed, hasGeocoding, isMapActive }) {
+export default function SyncPanel({ tableId, mapId, onBack, onNext, showHeader, skipConfirm, hasWebhook, webhookFailed, hasGeocoding, isMapActive, onConnect }) {
     const base = useBase();
 
     const table = tableId ? base.getTableByIdIfExists(tableId) : null;
@@ -581,6 +671,7 @@ export default function SyncPanel({ tableId, mapId, onBack, onNext, showHeader, 
             webhookFailed={webhookFailed}
             hasGeocoding={hasGeocoding}
             isMapActive={isMapActive}
+            onConnect={onConnect}
         />
     );
 }

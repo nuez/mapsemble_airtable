@@ -109,9 +109,16 @@ async function apiFetch(path, options, config, setToken) {
             token = await exchangeToken(clientId, clientSecret);
             if (setToken) setToken(token);
         } catch (_err) {
-            throw new Error('Session expired and re-authentication failed.');
+            const e = new Error('Session expired. Please reconnect to Mapsemble.');
+            e.code = 'UNAUTHORIZED';
+            throw e;
         }
         res = await doRequest(token);
+        if (res.status === 401) {
+            const e = new Error('Session expired. Please reconnect to Mapsemble.');
+            e.code = 'UNAUTHORIZED';
+            throw e;
+        }
     }
 
     return res;
@@ -206,12 +213,25 @@ export async function syncFeatures(mapId, features, config, setToken) {
     }
 
     if (!res.ok) {
+        let body = null;
         let message = `Feature sync failed (${res.status})`;
         try {
-            const body = await res.json();
-            if (body.message) {
-                message = body.message;
+            body = await res.json();
+        } catch (_e) {
+            const text = await res.text().catch(() => '');
+            if (text) message = `${message}: ${text}`;
+        }
+        if (body) {
+            // If the response contains a location_limit_reached failure, return
+            // the body so the caller can surface the upgrade prompt.
+            // Check both body.failed[] and top-level body.code for flexibility.
+            const isLimitReached =
+                (body.failed || []).some(f => f.code === 'location_limit_reached') ||
+                body.code === 'location_limit_reached';
+            if (isLimitReached) {
+                return body;
             }
+            if (body.message) message = body.message;
             if (body.errors) {
                 const details = Object.entries(body.errors)
                     .map(([field, msgs]) => {
@@ -223,11 +243,13 @@ export async function syncFeatures(mapId, features, config, setToken) {
                     .join(' | ');
                 message = body.message ? `${body.message} - ${details}` : details;
             }
-        } catch (_e) {
-            const text = await res.text().catch(() => '');
-            if (text) message = `${message}: ${text}`;
         }
-        throw new Error(message);
+        const e = new Error(message);
+        e.status = res.status;
+        if (res.status === 400 && body?.error?.toLowerCase().includes('maximum number of features')) {
+            e.code = 'BATCH_TOO_LARGE';
+        }
+        throw e;
     }
 
     return res.json();
@@ -296,6 +318,7 @@ export async function putFeatures(mapId, features, config, setToken) {
 export async function fetchAllMapAirtableIds(mapId, config, setToken, onProgress) {
     const ids = new Set();
     let page = 1;
+    let fetched = 0;
     const perPage = 500;
 
     while (true) {
@@ -329,8 +352,9 @@ export async function fetchAllMapAirtableIds(mapId, config, setToken, onProgress
             const id = f?.properties?._airtable_id;
             if (id) ids.add(id);
         }
+        fetched += features.length;
 
-        if (onProgress) onProgress(ids.size, total);
+        if (onProgress) onProgress(fetched, total);
 
         if (features.length < perPage) break;
         page++;

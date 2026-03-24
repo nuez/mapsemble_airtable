@@ -56,6 +56,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
 
   const [missingMapIds, setMissingMapIds] = useState(new Set());
   const [loadingMaps, setLoadingMaps] = useState(false);
+  const [unauthorized, setUnauthorized] = useState(false);
   const [showExample, setShowExample] = useState(false);
   const wasExampleFullscreen = React.useRef(false);
   const [showContact, setShowContact] = useState(false);
@@ -100,8 +101,12 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
 
         setLoadingMaps(false);
       })
-      .catch(() => {
-        setMissingMapIds(new Set());
+      .catch((err) => {
+        if (err.code === 'UNAUTHORIZED') {
+          setUnauthorized(true);
+        } else {
+          setMissingMapIds(new Set());
+        }
         setLoadingMaps(false);
       });
   }, [activeTableId, mapIds]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -213,8 +218,30 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
         </Box>
       )}
 
+      {/* Unauthorized / session expired */}
+      {unauthorized && (
+        <Box
+          padding={3}
+          marginBottom={3}
+          className="bg-red-50 border border-red-300 rounded-md"
+          display="flex"
+          flexDirection="column"
+          alignItems="center"
+        >
+          <Text fontWeight="strong" className="text-red-700 !mb-1" style={{ textAlign: 'center' }}>
+            Session expired
+          </Text>
+          <Text size="small" className="text-red-600 !mb-3" style={{ textAlign: 'center' }}>
+            Your connection to Mapsemble is no longer valid. Please reconnect to continue.
+          </Text>
+          <Button onClick={onConnect} variant="primary">
+            Reconnect to Mapsemble
+          </Button>
+        </Box>
+      )}
+
       {/* Maps list */}
-      {maps.length > 0 && (
+      {!unauthorized && maps.length > 0 && (
         <Box marginBottom={3}>
           {loadingMaps && (
             <Box display="flex" alignItems="center" marginBottom={2}>
@@ -246,18 +273,6 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                     <Text size="small" className="text-gray-400 mt-0.5">
                       Never synced
                     </Text>
-                  )}
-                  {map.limitReached && (
-                    <Box
-                      display="inline-flex"
-                      alignItems="center"
-                      marginTop={1}
-                      className="bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5"
-                    >
-                      <Text size="small" className="text-amber-800">
-                        Location limit reached
-                      </Text>
-                    </Box>
                   )}
                   {map.autoSync && globalConfig.get('airtablePat') ? (
                     <Box
@@ -338,6 +353,16 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                   </Button>
                 </Box>
               </Box>
+              {map.limitReached && !missingMapIds.has(map.mapId) && (
+                <Box marginTop={2} padding={2} className="bg-blue-600 rounded-md" display="flex" alignItems="center" justifyContent="space-between">
+                  <Text size="small" fontWeight="strong" style={{ color: '#fff' }}>
+                    Location limit reached
+                  </Text>
+                  <a href={`${MAPSEMBLE_URL}/map/${map.mapId}`} target="_blank" rel="noreferrer" className="text-white underline text-xs font-medium whitespace-nowrap ml-2">
+                    Upgrade to increase limit ↗
+                  </a>
+                </Box>
+              )}
               {missingMapIds.has(map.mapId) && (
                 <Box marginTop={2} padding={2}
                      className="bg-red-50 border border-red-300 rounded-md">
@@ -375,7 +400,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
 
       {/* Action buttons */}
       <Box display="flex" className="gap-2">
-        {connected ? (
+        {connected && !unauthorized ? (
           <Button
             onClick={() => onCreateNew(activeTableId)}
             variant="primary"
@@ -384,7 +409,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
           >
             + Create a new map
           </Button>
-        ) : (
+        ) : !connected ? (
           <Button
             onClick={onConnect}
             variant="primary"
@@ -392,7 +417,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
           >
             Connect to Mapsemble
           </Button>
-        )}
+        ) : null}
         {!connected && (
           <Button
             onClick={() => setShowExample(true)}
