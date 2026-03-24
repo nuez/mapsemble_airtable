@@ -10,9 +10,8 @@ import {
     FormField,
     Input,
 } from '@airtable/blocks/ui';
-import { createMap, updateMap, MAPSEMBLE_URL, NGROK_URL } from '../services/mapsemble';
+import { createMap, updateMap, MAPSEMBLE_URL } from '../services/mapsemble';
 import { buildSlugMap, toSlug } from '../services/geojson';
-import { registerAirtableWebhook, listAirtableWebhooks, deleteAirtableWebhook } from '../services/airtable';
 
 function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, onBack }) {
     const globalConfig = useGlobalConfig();
@@ -38,7 +37,6 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
     const [building, setBuilding] = useState(false);
     const [buildStep, setBuildStep] = useState(''); // 'creating' | 'generating'
     const [error, setError] = useState('');
-    const [webhookWarning, setWebhookWarning] = useState('');
     const [deletedFields, setDeletedFields] = useState([]);
 
     const isMounted = useRef(true);
@@ -212,77 +210,7 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                 config: { generateTemplates: true },
             }, cfg, setToken);
 
-            // Attempt automatic webhook registration if a PAT is configured
-            const pat = globalConfig.get('airtablePat');
             const existingConfig = globalConfig.get(['tableConfigs', tableId]) || {};
-            let airtableWebhookId = null;
-
-            if (pat && baseId && tableId) {
-                try {
-                    // 1. Fetch the webhook token / notification URL from Mapsemble
-                    console.log(`[Mapsemble] Fetching webhook notification URL for map ${map.id}`);
-                    const dsRes = await fetch(
-                        `${MAPSEMBLE_URL}/api/v1/webhook/airtable/${map.id}/data`,
-                        {
-                            method: 'GET',
-                            headers: {
-                                Authorization: `Bearer ${globalConfig.get('token')}`,
-                                'Content-Type': 'application/json',
-                            },
-                        },
-                    );
-                    if (!dsRes.ok) {
-                        throw new Error(`webhook-endpoint-not-found:${dsRes.status}`);
-                    }
-                    const dsData = await dsRes.json();
-                    const rawNotificationUrl = dsData.notificationUrl;
-                    const notificationUrl = NGROK_URL
-                        ? rawNotificationUrl.replace(
-                            new URL(MAPSEMBLE_URL).origin,
-                            NGROK_URL.replace(/\/$/, ''),
-                          )
-                        : rawNotificationUrl;
-                    console.log(`[Mapsemble] notificationUrl: ${notificationUrl}`);
-
-                    // 2. Delete any existing Airtable webhooks scoped to this table
-                    const existingWebhooks = await listAirtableWebhooks(baseId, pat);
-                    const tableWebhooks = existingWebhooks.filter(
-                        w => w.specification?.options?.filters?.recordChangeScope === tableId,
-                    );
-                    console.log(`[Mapsemble] Deleting ${tableWebhooks.length} existing Airtable webhook(s) for table ${tableId}`);
-                    for (const w of tableWebhooks) {
-                        await deleteAirtableWebhook(baseId, w.id, pat);
-                    }
-
-                    // 3. Register a fresh webhook with Airtable
-                    console.log(`[Mapsemble] Registering Airtable webhook for table ${tableId}`);
-                    airtableWebhookId = await registerAirtableWebhook(baseId, tableId, notificationUrl, pat);
-                    console.log(`[Mapsemble] Airtable webhook registered: ${airtableWebhookId}`);
-
-                    // 4. Register this map <-> webhook with the Mapsemble backend
-                    console.log(`[Mapsemble] Registering webhook with Mapsemble backend`);
-                    const registerRes = await fetch(`${MAPSEMBLE_URL}/api/v1/webhook/airtable/register`, {
-                        method: 'POST',
-                        headers: {
-                            Authorization: `Bearer ${globalConfig.get('token')}`,
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            mapId: map.id,
-                            baseId,
-                            tableId,
-                            webhookId: airtableWebhookId,
-                            pat,
-                        }),
-                    });
-                    if (!registerRes.ok) {
-                        throw new Error(`Mapsemble webhook registration failed (${registerRes.status})`);
-                    }
-                } catch (webhookErr) {
-                    console.warn('[Mapsemble] Webhook auto-registration failed:', webhookErr);
-                    if (isMounted.current) setWebhookWarning('Auto-sync could not be enabled. You can set it up later from the sync panel.');
-                }
-            }
 
             const newEntry = {
                 mapId:          map.id,
@@ -293,10 +221,6 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             };
             await globalConfig.setAsync(['tableConfigs', tableId, 'maps'],
                 [...(existingConfig.maps || []), newEntry]);
-            // Store webhook at table level
-            if (airtableWebhookId) {
-                await globalConfig.setAsync(['tableConfigs', tableId, 'airtableWebhookId'], airtableWebhookId);
-            }
             await globalConfig.setAsync('activeMapId', map.id);
 
             if (onComplete) onComplete(map.id);
@@ -375,12 +299,6 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             <Text size="small" textColor="light" marginBottom={3}>
                 {records.length} record{records.length !== 1 ? 's' : ''} available
             </Text>
-
-            {webhookWarning && (
-                <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
-                    <Text size="small" className="text-amber-700">{webhookWarning}</Text>
-                </Box>
-            )}
 
             {error && (
                 <Box

@@ -37,7 +37,7 @@ function LocationModeCard({ selected, onClick, title, description }) {
     );
 }
 
-export default function LocationMapper({ tableId, initialConfig, onComplete, onCancel, hasGeocoding }) {
+export default function LocationMapper({ tableId, initialConfig, onComplete, onCancel, hasGeocoding, isMapActive }) {
     const base = useBase();
     const globalConfig = useGlobalConfig();
     const canWrite = globalConfig.hasPermissionToSet();
@@ -45,12 +45,13 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
     const fields = table ? table.fields : [];
 
     const defaultLocationMode = (() => {
-        if (initialConfig?.locationMode) return initialConfig.locationMode;
         const latPatterns = /^(lat|latitude)$/i;
         const lngPatterns = /^(lon|lng|longitude)$/i;
         const hasLat = fields.some(f => latPatterns.test(f.name));
         const hasLng = fields.some(f => lngPatterns.test(f.name));
-        return (hasLat && hasLng) ? 'dual' : 'single';
+        if (hasLat && hasLng) return 'dual';
+        if (initialConfig?.locationMode) return initialConfig.locationMode;
+        return 'single';
     })();
     const [locationMode, setLocationMode] = useState(defaultLocationMode);
     const [latField, setLatField] = useState(initialConfig?.latField || '');
@@ -61,6 +62,20 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
             ? initialConfig.locationFormat
             : '',
     );
+
+    // Re-detect location mode when table changes
+    useEffect(() => {
+        if (!fields.length) return;
+        const latPatterns = /^(lat|latitude)$/i;
+        const lngPatterns = /^(lon|lng|longitude)$/i;
+        const hasLat = fields.some(f => latPatterns.test(f.name));
+        const hasLng = fields.some(f => lngPatterns.test(f.name));
+        if (hasLat && hasLng) {
+            setLocationMode('dual');
+        } else {
+            setLocationMode('single');
+        }
+    }, [tableId]);
 
     // Auto-detect lat/lng fields in dual-column mode
     useEffect(() => {
@@ -73,9 +88,10 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
         if (matchedLng) setLngField(matchedLng.id);
     }, [locationMode, fields]);
 
+    const geocodingAvailable = hasGeocoding && isMapActive !== false;
     const canAdvance = locationMode === 'dual'
         ? latField && lngField
-        : locationColumn && locationFormat && (locationFormat !== 'address' || hasGeocoding);
+        : locationColumn && locationFormat;
 
     const fieldOptions = [
         { value: '', label: '- none -' },
@@ -90,7 +106,7 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
         { value: 'geojson', label: 'GeoJSON' },
         { value: 'wkt', label: 'WKT' },
         { value: 'coordinate_pair', label: 'Coordinate Pair (lat, lng)' },
-        { value: 'address', label: hasGeocoding ? 'Address (Geocoding)' : 'Geocoding' },
+        { value: 'address', label: geocodingAvailable ? 'Geocoding (PRO)' : 'Geocoding (PRO)' },
     ];
 
     function handleComplete() {
@@ -199,7 +215,14 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
                                     </Text>
                                 </Box>
                             )}
-                            {locationFormat === 'address' && hasGeocoding && (
+                            {locationFormat === 'address' && hasGeocoding && isMapActive === false && (
+                                <Box padding={2} marginTop={2} className="bg-amber-50 border border-amber-200 rounded">
+                                    <Text size="small" className="text-amber-800">
+                                        Geocoding is only available on active maps. Activate your map in Mapsemble to enable geocoding.
+                                    </Text>
+                                </Box>
+                            )}
+                            {locationFormat === 'address' && geocodingAvailable && (
                                 <Box padding={2} marginTop={2} className="bg-blue-50 border border-blue-200 rounded">
                                     <Text size="small" className="text-blue-800">
                                         Mapsemble will geocode addresses and text fields to coordinates automatically when you sync.
@@ -215,9 +238,7 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
                 <Text size="small" marginBottom={2} className="text-amber-600">
                     {locationMode === 'dual'
                         ? 'Select both a latitude and a longitude field to continue.'
-                        : locationColumn && locationFormat === 'address' && !hasGeocoding
-                            ? 'Geocoding is not available yet.'
-                            : 'Select a location column and format to continue.'}
+                        : 'Select a location column and format to continue.'}
                 </Text>
             )}
 

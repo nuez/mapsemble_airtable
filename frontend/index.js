@@ -1,5 +1,5 @@
 import './style.css';
-import { initializeBlock, useGlobalConfig, useBase, useCursor, Box, Text, Button, Link } from '@airtable/blocks/ui';
+import { initializeBlock, useGlobalConfig, useBase, useCursor, useViewport, Box, Text, Button, Heading, Link } from '@airtable/blocks/ui';
 import React, { useState, useEffect } from 'react';
 
 import { updateMap, fetchMe, MAPSEMBLE_URL, NGROK_URL } from './services/mapsemble';
@@ -52,7 +52,7 @@ const LOGO_SVG = (
     </svg>
 );
 
-const CREATE_STEP_LABELS = ['Location', 'Label & Fields', 'Generate', 'Sync', 'Preview'];
+const CREATE_STEP_LABELS = ['Location', 'Label & Fields', 'Generate', 'Sync', 'Auto-sync', 'Preview'];
 
 function CreateStepIndicator({ currentStep }) {
     return (
@@ -167,6 +167,113 @@ function CreatePreviewStep({ mapId, mapLabel, onDone, onFullscreen }) {
     );
 }
 
+function WebhookSetupStep({ onRegister, onNext, hasPat }) {
+    const [status, setStatus] = useState('idle'); // 'idle' | 'registering' | 'success' | 'error'
+    const [error, setError] = useState(null);
+
+    async function handleRegister() {
+        setStatus('registering');
+        setError(null);
+        try {
+            await onRegister();
+            setStatus('success');
+        } catch (err) {
+            setStatus('error');
+            setError(err.message || 'Webhook registration failed.');
+        }
+    }
+
+    return (
+        <Box padding={3}>
+            <Heading size="small" marginBottom={2}>Auto-sync Setup</Heading>
+
+            <Text size="small" textColor="light" marginBottom={3}>
+                Enable auto-sync so changes in Airtable automatically update your map.
+            </Text>
+
+            {status === 'registering' && (
+                <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center" style={{ minHeight: 160 }}>
+                    <Box
+                        style={{
+                            width: 40,
+                            height: 40,
+                            border: '3px solid #e5e7eb',
+                            borderTopColor: '#2563eb',
+                            borderRadius: '50%',
+                            animation: 'mapsemble-spin 0.8s linear infinite',
+                            marginBottom: 16,
+                        }}
+                    />
+                    <Text size="small" textColor="light">Registering webhook with Airtable...</Text>
+                    <style>{`@keyframes mapsemble-spin { to { transform: rotate(360deg); } }`}</style>
+                </Box>
+            )}
+
+            {status === 'success' && (
+                <Box>
+                    <Box padding={2} marginBottom={3} backgroundColor="#f0fdf4" borderColor="#bbf7d0" border="default" borderRadius="default">
+                        <Box display="flex" alignItems="center" style={{ gap: 8 }}>
+                            <Box
+                                flexShrink={0}
+                                style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#10b981' }}
+                            />
+                            <Text size="small" style={{ color: '#065f46' }}>
+                                Auto-sync enabled. Changes in Airtable will automatically update your map.
+                            </Text>
+                        </Box>
+                    </Box>
+                    <Button onClick={onNext} variant="primary" width="100%">
+                        Next
+                    </Button>
+                </Box>
+            )}
+
+            {status === 'error' && (
+                <Box>
+                    <Box padding={2} marginBottom={3} className="bg-amber-50 border border-amber-200 rounded-md">
+                        <Text size="small" fontWeight="strong" className="text-amber-700" marginBottom={1}>
+                            Auto-sync could not be enabled
+                        </Text>
+                        <Text size="small" className="text-amber-700">
+                            {error}
+                        </Text>
+                    </Box>
+                    <Button onClick={handleRegister} variant="primary" width="100%" marginBottom={2}>
+                        Retry
+                    </Button>
+                    <Button onClick={onNext} variant="default" width="100%">
+                        Skip
+                    </Button>
+                </Box>
+            )}
+
+            {status === 'idle' && (
+                <Box>
+                    {!hasPat && (
+                        <Box padding={2} marginBottom={3} className="bg-amber-50 border border-amber-200 rounded-md">
+                            <Text size="small" className="text-amber-700">
+                                No Personal Access Token configured. Auto-sync requires a PAT with webhook:manage scope. You can add one in Settings.
+                            </Text>
+                        </Box>
+                    )}
+                    <Button
+                        onClick={handleRegister}
+                        disabled={!hasPat}
+                        variant="primary"
+                        width="100%"
+                        marginBottom={2}
+                    >
+                        Enable auto-sync
+                    </Button>
+                    <Button onClick={onNext} variant="default" width="100%">
+                        Skip
+                    </Button>
+                </Box>
+            )}
+        </Box>
+    );
+}
+
 function AppHeader({ mode, activeTableId, createStep, onSettingsClick, onCancelCreate, connected }) {
     const base = useBase();
     const activeTable = activeTableId ? base.getTableByIdIfExists(activeTableId) : null;
@@ -235,6 +342,7 @@ function MapsembleApp() {
     const globalConfig = useGlobalConfig();
     const base = useBase();
     const cursor = useCursor();
+    const viewport = useViewport();
     const cursorTableId = cursor.activeTableId;
     const [migrated, setMigrated] = useState(false);
     const [mode, setMode] = useState(null);
@@ -247,12 +355,15 @@ function MapsembleApp() {
     const [showSetupModal, setShowSetupModal] = useState(false);
     const [showResyncNotice, setShowResyncNotice] = useState(false);
     const [webhookNotice, setWebhookNotice] = useState(null);
+    const [webhookFailed, setWebhookFailed] = useState(false);
     const [webhookModal, setWebhookModal] = useState(null); // null | { tableId, mapId }
     const [previewModal, setPreviewModal] = useState(null); // null | { mapId, mapLabel }
 
     const hasToken = !!globalConfig.get('token');
     const featureFlags = globalConfig.get('featureFlags');
+
     const hasGeocoding = featureFlags != null && typeof featureFlags === 'object' && featureFlags['geocoding'] === true;
+
 
     useEffect(() => {
         migrateIfNeeded(globalConfig)
@@ -277,14 +388,20 @@ function MapsembleApp() {
                     const pat = globalConfig.get('airtablePat');
                     if (pat) {
                         const tableConfigs = globalConfig.get('tableConfigs') || {};
-                        for (const tableConfig of Object.values(tableConfigs)) {
+                        for (const [tableId, tableConfig] of Object.entries(tableConfigs)) {
                             // One webhook per table - stored at table level
                             const baseId = (tableConfig.maps || []).find(m => m.airtableBaseId)?.airtableBaseId;
                             const webhookId = tableConfig.airtableWebhookId
                                 // backward-compat: fall back to per-map if table-level not yet set
                                 || (tableConfig.maps || []).find(m => m.airtableWebhookId)?.airtableWebhookId;
                             if (baseId && webhookId) {
-                                refreshAirtableWebhook(baseId, webhookId, pat);
+                                refreshAirtableWebhook(baseId, webhookId, pat).then((ok) => {
+                                    if (!ok) {
+                                        // Webhook no longer exists on Airtable — clear the stale ID
+                                        globalConfig.setAsync(['tableConfigs', tableId, 'airtableWebhookId'], null)
+                                            .catch(() => {});
+                                    }
+                                });
                             }
                         }
                     }
@@ -332,6 +449,7 @@ function MapsembleApp() {
         setActiveTableId(tableId);
         setPendingLocConfig(null);
         setPendingFieldConfig(null);
+        setWebhookFailed(false);
         setCreateStep(1);
         setMode('create');
     }
@@ -347,6 +465,7 @@ function MapsembleApp() {
     }
 
     function startModify(tableId, mapId) {
+        setWebhookFailed(false);
         setActiveTableId(tableId);
         setActiveMapId(mapId);
         setPendingLocConfig(null);
@@ -377,26 +496,20 @@ function MapsembleApp() {
         setCreateStep(3);
     }
 
-    // Create step 4 → 5
+    // Create step 4 → 5 (auto-sync setup)
     function handleSyncComplete() {
         setCreateStep(5);
+    }
+
+    // Create step 5 → 6
+    function handleWebhookSetupComplete() {
+        setCreateStep(6);
     }
 
     // Create step 3 → 4 (called by MapBuilder after successful map creation)
     function handleMapBuilt(newMapId) {
         if (newMapId) setActiveMapId(newMapId);
         setCreateStep(4);
-
-        // Best-effort: auto-register webhook
-        const pat = globalConfig.get('airtablePat');
-        const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
-        if (pat && !tc.airtableWebhookId) {
-            const mapEntry = (tc.maps || []).find(m => m.mapId === newMapId);
-            if (mapEntry?.airtableBaseId) {
-                performWebhookRegistration(activeTableId, newMapId, mapEntry.airtableBaseId)
-                    .catch(() => setWebhookNotice('Auto-sync could not be enabled. You can set it up later from the webhook panel.'));
-            }
-        }
     }
 
     // Modify step 1 → 2
@@ -512,6 +625,7 @@ function MapsembleApp() {
                         await performWebhookRegistration(activeTableId, activeMapId, mapEntry.airtableBaseId);
                     } catch (webhookErr) {
                         setWebhookNotice('Auto-sync could not be enabled. You can set it up later from the webhook panel.');
+                        setWebhookFailed(true);
                     }
                 }
             }
@@ -535,7 +649,7 @@ function MapsembleApp() {
         };
 
         const dsRes = await fetch(
-            `${MAPSEMBLE_URL}/api/v1/webhook/airtable/${mapId}/data`,
+            `${MAPSEMBLE_URL}/api/v1/webhook/airtable/${mapId}/config`,
             {
                 method: 'GET',
                 headers: {
@@ -568,7 +682,7 @@ function MapsembleApp() {
 
         const webhookId = await registerAirtableWebhook(baseId, tableId, notificationUrl, pat);
 
-        await fetch(`${MAPSEMBLE_URL}/api/v1/webhook/airtable/register`, {
+        await fetch(`${MAPSEMBLE_URL}/api/v1/airtable/webhook/register`, {
             method: 'POST',
             headers: {
                 Authorization: `Bearer ${config.token}`,
@@ -579,6 +693,13 @@ function MapsembleApp() {
 
         // Store webhook at table level - shared by all maps for this table
         await globalConfig.setAsync(['tableConfigs', tableId, 'airtableWebhookId'], webhookId);
+
+        // Mark this specific map as auto-sync enabled
+        const tc = globalConfig.get(['tableConfigs', tableId]) || {};
+        const updatedMaps = (tc.maps || []).map(m =>
+            m.mapId === mapId ? { ...m, autoSync: true } : m
+        );
+        await globalConfig.setAsync(['tableConfigs', tableId, 'maps'], updatedMaps);
 
         return webhookId;
     }
@@ -612,7 +733,7 @@ function MapsembleApp() {
             />
 
             <Box flex="auto" overflow="hidden" style={{ overflowY: 'auto' }}>
-              <Box style={{ maxWidth: 720, marginLeft: 'auto', marginRight: 'auto' }}>
+              <Box style={{ maxWidth: viewport.isFullscreen ? 720 : undefined, marginLeft: 'auto', marginRight: 'auto' }}>
                 {webhookNotice && (
                     <Box padding={2} margin={2} className="bg-amber-50 border border-amber-200 rounded-md">
                         <Box display="flex" justifyContent="space-between" alignItems="center">
@@ -647,13 +768,15 @@ function MapsembleApp() {
                         onConnect={() => setShowSetupModal(true)}
                         showResyncNotice={showResyncNotice}
                         onDismissResyncNotice={() => setShowResyncNotice(false)}
+                        webhookFailed={webhookFailed}
+                        onDismissWebhookFailed={() => setWebhookFailed(false)}
                     />
                 )}
 
                 {!tableMismatch && mode === 'create' && createStep === 1 && (
                     <LocationMapper
                         tableId={activeTableId}
-                        initialConfig={pendingLocConfig || seedLocConfig(activeTableId)}
+                        initialConfig={pendingLocConfig || { locationMode: 'dual', latField: '', lngField: '', locationColumn: '', locationFormat: 'auto' }}
                         onComplete={handleLocationComplete}
                         onCancel={goHome}
                         hasGeocoding={hasGeocoding}
@@ -663,7 +786,7 @@ function MapsembleApp() {
                 {!tableMismatch && mode === 'create' && createStep === 2 && (
                     <FieldMapper
                         tableId={activeTableId}
-                        initialConfig={seedFieldConfig(activeTableId)}
+                        initialConfig={{ labelField: '', fieldMapping: {} }}
                         locationFieldIds={[pendingLocConfig?.latField, pendingLocConfig?.lngField, pendingLocConfig?.locationColumn].filter(Boolean)}
                         onComplete={handleFieldsComplete}
                         onBack={() => setCreateStep(1)}
@@ -679,18 +802,39 @@ function MapsembleApp() {
                     />
                 )}
 
-                {!tableMismatch && mode === 'create' && createStep === 4 && (
-                    <SyncPanel
-                        tableId={activeTableId}
-                        mapId={activeMapId}
-                        onBack={goHome}
-                        onNext={handleSyncComplete}
-                        showHeader={false}
-                        hasWebhook={!!(globalConfig.get(['tableConfigs', activeTableId, 'airtableWebhookId']))}
-                    />
-                )}
+                {!tableMismatch && mode === 'create' && createStep === 4 && (() => {
+                    const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
+                    const mapEntry = (tc.maps || []).find(m => m.mapId === activeMapId);
+                    return (
+                        <SyncPanel
+                            tableId={activeTableId}
+                            mapId={activeMapId}
+                            onBack={goHome}
+                            onNext={handleSyncComplete}
+                            showHeader={false}
+                            hasGeocoding={hasGeocoding}
+                            isMapActive={mapEntry?.active === true}
+                        />
+                    );
+                })()}
 
-                {!tableMismatch && mode === 'create' && createStep === 5 && (
+                {!tableMismatch && mode === 'create' && createStep === 5 && (() => {
+                    const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
+                    const mapEntry = (tc.maps || []).find(m => m.mapId === activeMapId);
+                    return (
+                        <WebhookSetupStep
+                            hasPat={!!globalConfig.get('airtablePat')}
+                            onRegister={() => performWebhookRegistration(
+                                activeTableId,
+                                activeMapId,
+                                mapEntry?.airtableBaseId,
+                            )}
+                            onNext={handleWebhookSetupComplete}
+                        />
+                    );
+                })()}
+
+                {!tableMismatch && mode === 'create' && createStep === 6 && (
                     <CreatePreviewStep
                         mapId={activeMapId}
                         mapLabel={(() => {
@@ -707,24 +851,36 @@ function MapsembleApp() {
                     />
                 )}
 
-                {mode === 'sync' && (
-                    <SyncPanel
-                        tableId={activeTableId}
-                        mapId={activeMapId}
-                        onBack={goHome}
-                        showHeader={true}
-                    />
-                )}
+                {mode === 'sync' && (() => {
+                    const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
+                    const mapEntry = (tc.maps || []).find(m => m.mapId === activeMapId);
+                    return (
+                        <SyncPanel
+                            tableId={activeTableId}
+                            mapId={activeMapId}
+                            onBack={goHome}
+                            showHeader={true}
+                            skipConfirm={true}
+                            hasGeocoding={hasGeocoding}
+                            isMapActive={mapEntry?.active === true}
+                        />
+                    );
+                })()}
 
-                {!tableMismatch && mode === 'modify' && modifyStep === 1 && (
-                    <LocationMapper
-                        tableId={activeTableId}
-                        initialConfig={pendingLocConfig || seedLocConfig(activeTableId)}
-                        onComplete={handleModifyLocationComplete}
-                        onCancel={goHome}
-                        hasGeocoding={hasGeocoding}
-                    />
-                )}
+                {!tableMismatch && mode === 'modify' && modifyStep === 1 && (() => {
+                    const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
+                    const mapEntry = (tc.maps || []).find(m => m.mapId === activeMapId);
+                    return (
+                        <LocationMapper
+                            tableId={activeTableId}
+                            initialConfig={pendingLocConfig || seedLocConfig(activeTableId)}
+                            onComplete={handleModifyLocationComplete}
+                            onCancel={goHome}
+                            hasGeocoding={hasGeocoding}
+                            isMapActive={mapEntry?.active === true}
+                        />
+                    );
+                })()}
 
                 {!tableMismatch && mode === 'modify' && modifyStep === 2 && (
                     <FieldMapper

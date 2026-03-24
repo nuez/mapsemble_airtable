@@ -3,12 +3,15 @@ import {
   useBase,
   useCursor,
   useGlobalConfig,
+  useViewport,
   Box,
   Text,
   Button,
+  Link,
 } from '@airtable/blocks/ui';
 import { fetchMaps, MAPSEMBLE_URL } from '../services/mapsemble';
 import heroImage from '../assets/hero.js';
+import ContactForm from './ContactForm';
 
 function BtnSpinner() {
   return (
@@ -36,10 +39,11 @@ function formatDate(iso) {
   }
 }
 
-export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, onPreview, onConnect, showResyncNotice, onDismissResyncNotice }) {
+export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, onPreview, onConnect, showResyncNotice, onDismissResyncNotice, webhookFailed, onDismissWebhookFailed }) {
   const base = useBase();
   const cursor = useCursor();
   const globalConfig = useGlobalConfig();
+  const viewport = useViewport();
   const canWrite = globalConfig.hasPermissionToSet();
 
   const connected = !!globalConfig.get('token');
@@ -53,6 +57,8 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
   const [missingMapIds, setMissingMapIds] = useState(new Set());
   const [loadingMaps, setLoadingMaps] = useState(false);
   const [showExample, setShowExample] = useState(false);
+  const wasExampleFullscreen = React.useRef(false);
+  const [showContact, setShowContact] = useState(false);
   const [loadingBtn, setLoadingBtn] = useState(null);
 
   const mapIds = maps.map((m) => m.mapId).join(',');
@@ -73,11 +79,25 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
     };
     setLoadingMaps(true);
     fetchMaps(config, (newToken) => globalConfig.setAsync('token', newToken))
-      .then((remoteMaps) => {
-        const remoteIds = new Set(remoteMaps.map((m) => String(m.id)));
+      .then(async (remoteMaps) => {
+        const remoteById = new Map(remoteMaps.map((m) => [String(m.id), m]));
         setMissingMapIds(
-          new Set(maps.filter((m) => !remoteIds.has(String(m.mapId))).map((m) => m.mapId)),
+          new Set(maps.filter((m) => !remoteById.has(String(m.mapId))).map((m) => m.mapId)),
         );
+
+        // Persist remote status on each local map entry
+        const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
+        const updatedMaps = (tc.maps || []).map((m) => {
+          const remote = remoteById.get(String(m.mapId));
+          if (remote && remote.active !== undefined) {
+            return { ...m, active: remote.active };
+          }
+          return m;
+        });
+        if (canWrite) {
+          await globalConfig.setAsync(['tableConfigs', activeTableId, 'maps'], updatedMaps);
+        }
+
         setLoadingMaps(false);
       })
       .catch(() => {
@@ -85,6 +105,23 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
         setLoadingMaps(false);
       });
   }, [activeTableId, mapIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Enter fullscreen when example is opened
+  useEffect(() => {
+    if (showExample) {
+      viewport.enterFullscreenIfPossible();
+    }
+  }, [showExample]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-close example when fullscreen is exited externally
+  useEffect(() => {
+    if (viewport.isFullscreen && showExample) {
+      wasExampleFullscreen.current = true;
+    } else if (wasExampleFullscreen.current && !viewport.isFullscreen) {
+      wasExampleFullscreen.current = false;
+      setShowExample(false);
+    }
+  }, [viewport.isFullscreen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function removeMap(mapId) {
     const tc = globalConfig.get(['tableConfigs', activeTableId]) || {};
@@ -118,26 +155,66 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
         </Box>
       )}
 
-      {/* Maps list */}
-      {maps.length === 0 ? (
-        <Box>
-          <Box
-            className={'mb-5'}
-          >
-            <Text size="large" fontWeight="strong" className="text-gray-700 !mb-2">
-              Visualize your Airtable data on a map, instantly.
+      {/* Webhook failed notice */}
+      {webhookFailed && (
+        <Box
+          display="flex"
+          alignItems="flex-start"
+          justifyContent="space-between"
+          padding={2}
+          marginBottom={3}
+          className="bg-amber-50 border border-amber-200 rounded-md"
+        >
+          <Box>
+            <Text size="small" fontWeight="strong" className="text-amber-700">
+              Auto-sync could not be enabled
             </Text>
-            <Text size="default" className="text-gray-500 !mt-3">
-              Connect any table with location data, drop your records as map
-              markers, and keep everything in sync - without leaving Airtable.
-              Customize marker icons, popup cards, colors, and more to make
-              each map your own.
+            <Text size="small" className="text-amber-700" marginTop={1}>
+              There was a problem registering the webhook. You can set it up from the webhook panel.
             </Text>
           </Box>
-
-
+          <Button onClick={onDismissWebhookFailed} variant="default" size="small" className="ml-2 shrink-0">
+            Dismiss
+          </Button>
         </Box>
-      ) : (
+      )}
+
+      {/* Intro copy for new users */}
+      {maps.length === 0 && !connected && (
+        <Box className="mb-5">
+          <h3 className="text-gray-700 font-bold !mb-2 mt-0 text-lg">
+            Turn your Airtable data into filterable map listings
+          </h3>
+          <Box display="flex" className="gap-3 items-stretch" marginTop={3}>
+            <Box display="flex" flexDirection="column" justifyContent="center" padding={3} className="bg-blue-50 rounded-md text-black/70 basis-1/2 flex-1">
+              <p className=" text-sm m-0 font-semibold leading-tight">
+                Connect any table with location data and get an interactive map your visitors can browse, filter, and search - like Airbnb or Booking.com.
+              </p>
+              <p className="text-black/60 text-xs mt-3 m-0">
+                Great for real estate listings, vacation rentals, venue browsers, people directories, and more.
+              </p>
+            </Box>
+            <Box
+              padding={3}
+              display="flex"
+              flexDirection="column"
+              justifyContent="center"
+              className="bg-blue-50 rounded-md basis-1/2 flex-1"
+            >
+              <p  className="text-black/70  mb-2  text-sm m-0 font-semibold leading-tight">Features</p>
+              <ul className="list-disc pl-5 space-y-1 m-0">
+                <li className="text-xs">Rich popup cards with photos and details</li>
+                <li className="text-xs">Filter by price, category, availability, or any field</li>
+                <li className="text-xs">Auto-syncs when your Airtable changes</li>
+                <li className="text-xs">Fully customizable: pins, cards, colors, layout</li>
+              </ul>
+            </Box>
+          </Box>
+        </Box>
+      )}
+
+      {/* Maps list */}
+      {maps.length > 0 && (
         <Box marginBottom={3}>
           {loadingMaps && (
             <Box display="flex" alignItems="center" marginBottom={2}>
@@ -182,7 +259,7 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
                       </Text>
                     </Box>
                   )}
-                  {tableConfig.airtableWebhookId && globalConfig.get('airtablePat') ? (
+                  {map.autoSync && globalConfig.get('airtablePat') ? (
                     <Box
                       display="inline-flex"
                       alignItems="center"
@@ -287,6 +364,15 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
         </Box>
       )}
 
+      {/* Short description for logged-in users with no maps */}
+      {connected && maps.length === 0 && (
+        <Box marginY={3}>
+          <Text className="text-gray-500">
+            Create a map from your <strong>{activeTable ? activeTable.name : 'current'}</strong> table to turn your location data into an interactive, filterable map.
+          </Text>
+        </Box>
+      )}
+
       {/* Action buttons */}
       <Box display="flex" className="gap-2">
         {connected ? (
@@ -325,6 +411,29 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
         )}
       </Box>
 
+      {/* Contact CTA */}
+      <Box
+        marginTop={3}
+        padding={3}
+        className="bg-blue-50 border border-blue-200 rounded-md"
+        display="flex"
+        flexDirection="column"
+        alignItems="center"
+      >
+        <Text size="default" fontWeight="strong" className="text-gray-700 !mb-1" style={{ textAlign: 'center' }}>
+          We'd love to help you get on board
+        </Text>
+        <Text size="small" className="text-gray-500 !mb-3" style={{ textAlign: 'center' }}>
+          Tell us your idea and let us build your map together.
+        </Text>
+        <Button
+          onClick={() => setShowContact(true)}
+          variant="primary"
+        >
+          Tell us about your idea
+        </Button>
+      </Box>
+
       {/* Hero image - shown below buttons when not connected */}
       {!connected && maps.length === 0 && (
         <Box marginTop={3} className="rounded-md overflow-hidden">
@@ -335,6 +444,9 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
           />
         </Box>
       )}
+
+      {/* Contact form modal */}
+      {showContact && <ContactForm onClose={() => setShowContact(false)} />}
 
       {/* Example map modal */}
       {showExample && (
@@ -358,8 +470,13 @@ export default function HomeScreen({ onCreateNew, onSync, onModify, onWebhook, o
             flexShrink={0}
           >
             <Text fontWeight="strong">Map Example</Text>
-            <Button onClick={() => setShowExample(false)} variant="default"
-                    size="small">
+            <Button onClick={() => {
+              if (viewport.isFullscreen) {
+                viewport.exitFullscreen();
+              } else {
+                setShowExample(false);
+              }
+            }} variant="default" size="small">
               Close
             </Button>
           </Box>

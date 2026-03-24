@@ -235,15 +235,15 @@ export async function refreshAirtableWebhook(baseId, webhookId, pat) {
     const url = `${AIRTABLE_API_BASE}/bases/${baseId}/webhooks/${webhookId}/refresh`;
 
     try {
-        await fetch(url, {
+        const res = await fetch(url, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${pat}`,
                 'Content-Type': 'application/json',
             },
         });
-        // Swallow errors - this is a best-effort safety net
+        return res.ok;
     } catch (_err) {
-        // ignore
+        return false;
     }
 }

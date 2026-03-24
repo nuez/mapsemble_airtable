@@ -140,6 +140,7 @@ export default function FieldMapper({ tableId, initialConfig, locationFieldIds =
         }
         const detected = {};
         for (const field of fields) {
+            if (locationFieldIds.includes(field.id)) continue;
             detected[field.id] = { remoteType: getDefaultType(field) };
         }
         setFieldMapping(prev => ({ ...prev, ...detected }));
