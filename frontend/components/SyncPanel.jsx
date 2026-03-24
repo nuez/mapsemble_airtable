@@ -12,16 +12,17 @@ import {
 import { recordToFeature } from '../services/geojson';
 import {
     syncFeatures,
-    putFeatures,
     fetchAllMapAirtableIds,
     deleteFeaturesByAirtableIds,
     MAPSEMBLE_URL,
 } from '../services/mapsemble';
 
-const BATCH_SIZE = 500;
+function getBatchSize(total) {
+    return Math.min(2000, Math.max(50, Math.ceil(total / 10)));
+}
 const MAX_ERRORS = 10;
 
-function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, hasWebhook }) {
+function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, skipConfirm, hasWebhook, webhookFailed, hasGeocoding, isMapActive }) {
     const globalConfig = useGlobalConfig();
     const canWrite = globalConfig.hasPermissionToSet();
     const neededFieldIds = (() => {
@@ -45,9 +46,13 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
     const activeMap   = (tableConfig.maps || []).find(m => m.mapId === mapId) || null;
     const lastSync    = activeMap?.lastSync  || null;
 
+    const usesGeocoding = tableConfig.locationFormat === 'address';
+    const geocodingBlocked = usesGeocoding && (!hasGeocoding || !isMapActive);
+
     const [deletedFields, setDeletedFields] = useState([]);
     const [confirmSync, setConfirmSync] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [syncDone, setSyncDone] = useState(false);
     const [progress, setProgress] = useState(null); // { phase: 'upsert'|'prune_read'|'prune_delete', done, total }
     const [errors, setErrors] = useState([]);
     const [mapNotFound, setMapNotFound] = useState(false);
@@ -131,11 +136,31 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
 
         let limitReached = false;
 
-        if (total <= 1000) {
-            // --- Tier 1: single PUT (full reconciliation) ---
-            setProgress({ phase: 'upsert', done: 0, total });
+        // Pre-fetch existing map IDs for pruning (skip on first sync - nothing to prune)
+        let mapIds = null;
+        if (lastSync) {
+            setProgress({ phase: 'prune_read', done: 0, total: 0 });
             try {
-                const result = await putFeatures(mapId, features, config, setToken);
+                mapIds = await fetchAllMapAirtableIds(mapId, config, setToken, (count, total) => {
+                    setProgress({ phase: 'prune_read', done: count, total: total || 0 });
+                });
+            } catch (err) {
+                if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
+                else { addError(`Could not fetch existing map features for cleanup: ${err.message}`); }
+            }
+        }
+
+        // Phase A - Upsert
+        let upsertHadErrors = false;
+        const upsertBatchSize = getBatchSize(total);
+        setProgress({ phase: 'upsert', done: 0, total });
+
+        for (let i = 0; i < total; i += upsertBatchSize) {
+            if (abortRef.current || limitReached) break;
+
+            const batch = features.slice(i, i + upsertBatchSize);
+            try {
+                const result = await syncFeatures(mapId, batch, config, setToken);
                 const limitFail = (result?.failed || []).find(
                     f => f.code === 'location_limit_reached'
                 );
@@ -144,79 +169,40 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
                     setLimitInfo({ limit: limitFail.limit, current: limitFail.current, totalRecords: total });
                 }
             } catch (err) {
-                if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
-                else { addError(`Sync failed: ${err.message}`); }
-            }
-            setProgress({ phase: 'upsert', done: total, total });
-        } else {
-            // --- Tier 2: batched POST upsert + GET-diff DELETE ---
-
-            // Pre-fetch existing map IDs for pruning (skip on first sync - nothing to prune)
-            let mapIds = null;
-            if (lastSync) {
-                setProgress({ phase: 'prune_read', done: 0, total: 0 });
-                try {
-                    mapIds = await fetchAllMapAirtableIds(mapId, config, setToken, (count, total) => {
-                        setProgress({ phase: 'prune_read', done: count, total: total || 0 });
-                    });
-                } catch (err) {
-                    if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); }
-                    else { addError(`Could not fetch existing map features for cleanup: ${err.message}`); }
-                }
+                if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); upsertHadErrors = true; }
+                else { addError(`Batch ${Math.floor(i / upsertBatchSize) + 1}: ${err.message}`); upsertHadErrors = true; }
             }
 
-            // Phase A - Upsert
-            let upsertHadErrors = false;
-            setProgress({ phase: 'upsert', done: 0, total });
+            await new Promise(r => setTimeout(r, 200));
+            setProgress({ phase: 'upsert', done: Math.min(i + upsertBatchSize, total), total });
+        }
 
-            for (let i = 0; i < total; i += BATCH_SIZE) {
-                if (abortRef.current || limitReached) break;
+        // Phase B - Prune removed records (skip if aborted, upsert had errors, limit reached, or no pre-fetched IDs)
+        if (!abortRef.current && !upsertHadErrors && !limitReached && mapIds !== null) {
+            const currentIds = new Set(features.map(f => f.properties._airtable_id));
+            const orphans = [...mapIds].filter(id => !currentIds.has(id));
 
-                const batch = features.slice(i, i + BATCH_SIZE);
-                try {
-                    const result = await syncFeatures(mapId, batch, config, setToken);
-                    const limitFail = (result?.failed || []).find(
-                        f => f.code === 'location_limit_reached'
-                    );
-                    if (limitFail) {
-                        limitReached = true;
-                        setLimitInfo({ limit: limitFail.limit, current: limitFail.current, totalRecords: total });
+            if (orphans.length > 0) {
+                const deleteBatchSize = getBatchSize(orphans.length);
+                let deleteDone = 0;
+                for (let i = 0; i < orphans.length; i += deleteBatchSize) {
+                    if (abortRef.current) {
+                        addError('Sync cancelled - some deleted records may still appear on the map.');
+                        break;
                     }
-                } catch (err) {
-                    if (err.code === 'MAP_NOT_FOUND') { mapGone = true; setMapNotFound(true); upsertHadErrors = true; }
-                    else { addError(`Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`); upsertHadErrors = true; }
-                }
-
-                await new Promise(r => setTimeout(r, 200));
-                setProgress({ phase: 'upsert', done: Math.min(i + BATCH_SIZE, total), total });
-            }
-
-            // Phase B - Prune removed records (skip if aborted, upsert had errors, limit reached, or no pre-fetched IDs)
-            if (!abortRef.current && !upsertHadErrors && !limitReached && mapIds !== null) {
-                const currentIds = new Set(features.map(f => f.properties._airtable_id));
-                const orphans = [...mapIds].filter(id => !currentIds.has(id));
-
-                if (orphans.length > 0) {
-                    let deleteDone = 0;
-                    for (let i = 0; i < orphans.length; i += BATCH_SIZE) {
-                        if (abortRef.current) {
-                            addError('Sync cancelled - some deleted records may still appear on the map.');
-                            break;
-                        }
-                        const batch = orphans.slice(i, i + BATCH_SIZE);
-                        try {
-                            await deleteFeaturesByAirtableIds(mapId, batch, config, setToken);
-                        } catch (err) {
-                            addError(`Delete batch ${Math.floor(i / BATCH_SIZE) + 1}: ${err.message}`);
-                        }
-                        await new Promise(r => setTimeout(r, 200));
-                        deleteDone = Math.min(i + BATCH_SIZE, orphans.length);
-                        setProgress({ phase: 'prune_delete', done: deleteDone, total: orphans.length });
+                    const batch = orphans.slice(i, i + deleteBatchSize);
+                    try {
+                        await deleteFeaturesByAirtableIds(mapId, batch, config, setToken);
+                    } catch (err) {
+                        addError(`Delete batch ${Math.floor(i / deleteBatchSize) + 1}: ${err.message}`);
                     }
+                    await new Promise(r => setTimeout(r, 200));
+                    deleteDone = Math.min(i + deleteBatchSize, orphans.length);
+                    setProgress({ phase: 'prune_delete', done: deleteDone, total: orphans.length });
                 }
-            } else if (upsertHadErrors) {
-                addError('Removal of deleted records skipped - re-sync after fixing errors above.');
             }
+        } else if (upsertHadErrors) {
+            addError('Removal of deleted records skipped - re-sync after fixing errors above.');
         }
 
         if (!abortRef.current && !mapGone) {
@@ -228,9 +214,11 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
         setSyncing(false);
         setProgress(null);
 
-        // Auto-advance to next step after successful sync
+        // Auto-advance to next step after successful sync (wizard mode)
         if (!abortRef.current && !mapGone && onNext) {
             onNext();
+        } else if (!abortRef.current && !mapGone && !onNext) {
+            setSyncDone(true);
         }
     }
 
@@ -307,6 +295,42 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
                     Cancel
                 </Button>
                 <style>{`@keyframes mapsemble-spin { to { transform: rotate(360deg); } }`}</style>
+            </Box>
+        );
+    }
+
+    if (syncDone) {
+        return (
+            <Box
+                display="flex"
+                flexDirection="column"
+                alignItems="center"
+                justifyContent="center"
+                padding={3}
+                style={{ height: '100%', minHeight: 300 }}
+            >
+                <Box
+                    style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: '50%',
+                        backgroundColor: '#d1fae5',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginBottom: 16,
+                        fontSize: 24,
+                    }}
+                >
+                    ✓
+                </Box>
+                <Heading size="small" marginBottom={1}>Sync complete</Heading>
+                <Text size="small" textColor="light" marginBottom={3}>
+                    {records.length} record{records.length !== 1 ? 's' : ''} synced to Mapsemble.
+                </Text>
+                <Button onClick={onBack} variant="default">
+                    ← Back to list
+                </Button>
             </Box>
         );
     }
@@ -390,6 +414,19 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
                   </Text>
                 </Box>
 
+                {geocodingBlocked && (
+                    <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                        <Text size="small" fontWeight="strong" className="text-amber-800">
+                            Geocoding unavailable
+                        </Text>
+                        <Text size="small" className="text-amber-700" marginTop={1}>
+                            {!hasGeocoding
+                                ? 'Geocoding is only available on the PRO plan. Upgrade Mapsemble to PRO to sync address data.'
+                                : 'Geocoding is only available on active maps. Activate your map in Mapsemble to sync address data.'}
+                        </Text>
+                    </Box>
+                )}
+
                 {!canWrite && (
                     <Box padding={2} marginBottom={2} className="bg-amber-50 border border-amber-200 rounded-md">
                         <Text size="small" className="text-amber-700">
@@ -400,8 +437,8 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
 
                 {!confirmSync ? (
                     <Button
-                        onClick={() => setConfirmSync(true)}
-                        disabled={!canWrite || syncing || !mapId}
+                        onClick={() => skipConfirm ? handleSync() : setConfirmSync(true)}
+                        disabled={!canWrite || syncing || !mapId || geocodingBlocked}
                         variant="primary"
                         width="100%"
                     >
@@ -445,6 +482,15 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
                             />
                             <Text size="small" className="text-emerald-800">
                                 Auto-sync active
+                            </Text>
+                        </Box>
+                    ) : webhookFailed ? (
+                        <Box padding={2} className="bg-amber-50 border border-amber-200 rounded-md">
+                            <Text size="small" fontWeight="strong" className="text-amber-700">
+                                Auto-sync could not be enabled
+                            </Text>
+                            <Text size="small" className="text-amber-700" marginTop={1}>
+                                There was a problem registering the webhook. You can set up auto-sync manually from the webhook panel after saving.
                             </Text>
                         </Box>
                     ) : (
@@ -507,7 +553,7 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, has
     );
 }
 
-export default function SyncPanel({ tableId, mapId, onBack, onNext, showHeader, hasWebhook }) {
+export default function SyncPanel({ tableId, mapId, onBack, onNext, showHeader, skipConfirm, hasWebhook, webhookFailed, hasGeocoding, isMapActive }) {
     const base = useBase();
 
     const table = tableId ? base.getTableByIdIfExists(tableId) : null;
@@ -530,7 +576,11 @@ export default function SyncPanel({ tableId, mapId, onBack, onNext, showHeader, 
             onBack={onBack}
             onNext={onNext}
             showHeader={showHeader}
+            skipConfirm={skipConfirm}
             hasWebhook={hasWebhook}
+            webhookFailed={webhookFailed}
+            hasGeocoding={hasGeocoding}
+            isMapActive={isMapActive}
         />
     );
 }

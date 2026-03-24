@@ -184,66 +184,53 @@ export async function createMap(payload, config, setToken) {
  * Returns the API response body.
  */
 export async function syncFeatures(mapId, features, config, setToken) {
-    const BATCH_SIZE = 500;
-    const batches = [];
-    for (let i = 0; i < features.length; i += BATCH_SIZE) {
-        batches.push(features.slice(i, i + BATCH_SIZE));
+    const requestBody = {
+        type: 'FeatureCollection',
+        features,
+        remoteField: '_airtable_id',
+    };
+    const res = await apiFetch(
+        `/api/v1/maps/${mapId}/features`,
+        {
+            method: 'POST',
+            body: JSON.stringify(requestBody),
+        },
+        config,
+        setToken,
+    );
+
+    if (res.status === 404) {
+        const e = new Error('Map not found - it may have been deleted in Mapsemble (404)');
+        e.code = 'MAP_NOT_FOUND';
+        throw e;
     }
 
-    let lastResult;
-    for (const batch of batches) {
-        const requestBody = {
-            type: 'FeatureCollection',
-            features: batch,
-            remoteField: '_airtable_id',
-        };
-        const res = await apiFetch(
-            `/api/v1/maps/${mapId}/features`,
-            {
-                method: 'POST',
-                body: JSON.stringify(requestBody),
-            },
-            config,
-            setToken,
-        );
-
-        if (res.status === 404) {
-            const e = new Error('Map not found - it may have been deleted in Mapsemble (404)');
-            e.code = 'MAP_NOT_FOUND';
-            throw e;
-        }
-
-        if (!res.ok) {
-            console.log('[syncFeatures] Response status:', res.status);
-            let message = `Feature sync failed (${res.status})`;
-            try {
-                const body = await res.json();
-                console.log('[syncFeatures] Response body:', body);
-                if (body.message) {
-                    message = body.message;
-                }
-                if (body.errors) {
-                    const details = Object.entries(body.errors)
-                        .map(([field, msgs]) => {
-                            const val = Array.isArray(msgs)
-                                ? msgs.map(m => (typeof m === 'string' ? m : JSON.stringify(m))).join(', ')
-                                : (typeof msgs === 'string' ? msgs : JSON.stringify(msgs));
-                            return `${field}: ${val}`;
-                        })
-                        .join(' | ');
-                    message = body.message ? `${body.message} - ${details}` : details;
-                }
-            } catch (_e) {
-                const text = await res.text().catch(() => '');
-                if (text) message = `${message}: ${text}`;
+    if (!res.ok) {
+        let message = `Feature sync failed (${res.status})`;
+        try {
+            const body = await res.json();
+            if (body.message) {
+                message = body.message;
             }
-            throw new Error(message);
+            if (body.errors) {
+                const details = Object.entries(body.errors)
+                    .map(([field, msgs]) => {
+                        const val = Array.isArray(msgs)
+                            ? msgs.map(m => (typeof m === 'string' ? m : JSON.stringify(m))).join(', ')
+                            : (typeof msgs === 'string' ? msgs : JSON.stringify(msgs));
+                        return `${field}: ${val}`;
+                    })
+                    .join(' | ');
+                message = body.message ? `${body.message} - ${details}` : details;
+            }
+        } catch (_e) {
+            const text = await res.text().catch(() => '');
+            if (text) message = `${message}: ${text}`;
         }
-
-        lastResult = await res.json();
+        throw new Error(message);
     }
 
-    return lastResult;
+    return res.json();
 }
 
 /**
@@ -258,6 +245,7 @@ export async function putFeatures(mapId, features, config, setToken) {
         features,
         remoteField: '_airtable_id',
     };
+    console.log('[putFeatures] Request body:', requestBody);
     const res = await apiFetch(
         `/api/v1/maps/${mapId}/features`,
         {
