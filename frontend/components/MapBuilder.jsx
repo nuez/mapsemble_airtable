@@ -162,10 +162,10 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
             const payload = {
                 label: mapName,
                 published: true,
-                externalSource: 'airtable',
                 config: { debug: false, remoteField: '_airtable_id', ...(geocodeField ? { geocodeField } : {}) },
                 dataSource: {
-                    type: 'airtable',
+                    mode: 'synced',
+                    provider: 'airtable',
                     label: 'Data layer',
                     config: {
                         baseId: baseId || '',

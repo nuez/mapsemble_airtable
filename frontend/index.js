@@ -598,8 +598,9 @@ function MapsembleApp() {
                     {
                         fields,
                         config: { remoteField: '_airtable_id', ...(geocodeFieldSlug ? { geocodeField: geocodeFieldSlug } : {}) },
-                        externalSource: 'airtable',
                         dataSource: {
+                            mode: 'synced',
+                            provider: 'airtable',
                             config: {
                                 labelFieldName:     resolveFieldName(fieldConfig.labelField),
                                 locationMode:       pendingLocConfig?.locationMode || 'dual',
