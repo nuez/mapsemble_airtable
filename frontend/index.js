@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 
 import { updateMap, fetchMe, MAPSEMBLE_URL, NGROK_URL } from './services/mapsemble';
 import { refreshAirtableWebhook, registerAirtableWebhook, deleteAirtableWebhook, listAirtableWebhooks } from './services/airtable';
-import { buildSlugMap, toSlug } from './services/geojson';
+import { buildSlugMap, deduplicateOptionKeys, toSlug } from './services/geojson';
 import Setup from './components/Setup';
 import HomeScreen from './components/HomeScreen';
 import LocationMapper from './components/LocationMapper';
@@ -544,11 +544,11 @@ function MapsembleApp() {
                     const airtableField = table.getFieldByIdIfExists(fieldId);
                     const choices = airtableField?.options?.choices || [];
                     fieldDef.config = {
-                        options: choices.map((choice, i) => ({
+                        options: deduplicateOptionKeys(choices.map((choice, i) => ({
                             key:    choice.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
                             label:  choice.name,
                             weight: i + 1,
-                        })),
+                        }))),
                         allowMultiple: meta.remoteType === 'multi_select',
                     };
                 }

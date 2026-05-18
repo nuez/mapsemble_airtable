@@ -9,6 +9,20 @@ export function toSlug(name) {
 }
 
 /**
+ * Takes an array of options with a `key` property and returns a new array
+ * where duplicate keys get a _2, _3, … suffix.
+ */
+export function deduplicateOptionKeys(options) {
+    const seen = new Map();
+    return options.map(opt => {
+        const base = opt.key;
+        const count = seen.get(base) || 0;
+        seen.set(base, count + 1);
+        return { ...opt, key: count === 0 ? base : `${base}_${count + 1}` };
+    });
+}
+
+/**
  * Builds a fieldId → deduplicated-slug map from an ordered array of { fieldId, name }.
  * When two fields produce the same base slug, the second gets a _2 suffix, the third _3, etc.
  */

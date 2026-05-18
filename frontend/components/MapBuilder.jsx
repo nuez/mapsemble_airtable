@@ -11,7 +11,7 @@ import {
     Input,
 } from '@airtable/blocks/ui';
 import { createMap, updateMap, MAPSEMBLE_URL } from '../services/mapsemble';
-import { buildSlugMap, toSlug } from '../services/geojson';
+import { buildSlugMap, deduplicateOptionKeys, toSlug } from '../services/geojson';
 
 function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, onBack }) {
     const globalConfig = useGlobalConfig();
@@ -121,11 +121,11 @@ function MapBuilderInner({ table, tableId, baseId, pendingConfig, onComplete, on
                     const airtableField = table.getFieldByIdIfExists(fieldId);
                     const choices = airtableField?.options?.choices || [];
                     fieldDef.config = {
-                        options: choices.map((choice, i) => ({
+                        options: deduplicateOptionKeys(choices.map((choice, i) => ({
                             key:    choice.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
                             label:  choice.name,
                             weight: i + 1,
-                        })),
+                        }))),
                         allowMultiple: meta.remoteType === 'multi_select',
                     };
                 }
