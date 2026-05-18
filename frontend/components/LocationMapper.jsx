@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
     useBase,
     useGlobalConfig,
@@ -45,12 +45,12 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
     const fields = table ? table.fields : [];
 
     const defaultLocationMode = (() => {
+        if (initialConfig?.locationMode) return initialConfig.locationMode;
         const latPatterns = /^(lat|latitude)$/i;
         const lngPatterns = /^(lon|lng|longitude)$/i;
         const hasLat = fields.some(f => latPatterns.test(f.name));
         const hasLng = fields.some(f => lngPatterns.test(f.name));
         if (hasLat && hasLng) return 'dual';
-        if (initialConfig?.locationMode) return initialConfig.locationMode;
         return 'single';
     })();
     const [locationMode, setLocationMode] = useState(defaultLocationMode);
@@ -63,18 +63,20 @@ export default function LocationMapper({ tableId, initialConfig, onComplete, onC
             : '',
     );
 
-    // Re-detect location mode when table changes
+    // Re-detect location mode only when the user switches tables — never override
+    // the saved/initial mode on first render.
+    const didMountRef = useRef(false);
     useEffect(() => {
+        if (!didMountRef.current) {
+            didMountRef.current = true;
+            return;
+        }
         if (!fields.length) return;
         const latPatterns = /^(lat|latitude)$/i;
         const lngPatterns = /^(lon|lng|longitude)$/i;
         const hasLat = fields.some(f => latPatterns.test(f.name));
         const hasLng = fields.some(f => lngPatterns.test(f.name));
-        if (hasLat && hasLng) {
-            setLocationMode('dual');
-        } else {
-            setLocationMode('single');
-        }
+        setLocationMode(hasLat && hasLng ? 'dual' : 'single');
     }, [tableId]);
 
     // Auto-detect lat/lng fields in dual-column mode

@@ -141,14 +141,20 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
         const config = getConfig();
         const setToken = (t) => globalConfig.setAsync('token', t);
 
+        const skippedRecords = [];
         const features = records
-            .map(r => recordToFeature(r, fieldMapping))
+            .map(r => recordToFeature(r, fieldMapping, skippedRecords))
             .filter(Boolean);
 
         const total = features.length;
 
         let limitReached = false;
         let hadAnyError = false;
+
+        if (skippedRecords.length > 0) {
+            const count = skippedRecords.length;
+            addError(`${count} row${count !== 1 ? 's' : ''} skipped for not having a location.`);
+        }
 
         // Pre-fetch existing map IDs for pruning (skip on first sync - nothing to prune)
         let mapIds = null;

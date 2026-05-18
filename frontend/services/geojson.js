@@ -84,21 +84,70 @@ function getCellValue(record, fieldId) {
 }
 
 /**
- * Converts a single Airtable record to a GeoJSON Feature.
- * Returns null if geometry cannot be resolved.
+ * Parses a coordinate cell value into a Number.
+ * Accepts European decimal notation (single comma) by normalising to a dot.
+ * Unwraps Airtable wrappers: single-element arrays (lookups) and { value }
+ * objects (linked-record lookups returning { linkedRecordId, value }).
+ * Returns { ok, value?, isEmpty?, raw? } so the caller can distinguish empty
+ * cells (no warning) from non-numeric values (warning).
  */
-export function recordToFeature(record, fieldMapping) {
+function parseCoordinate(raw) {
+    if (raw === null || raw === undefined) return { ok: false, isEmpty: true };
+
+    let v = raw;
+    if (Array.isArray(v)) {
+        if (v.length === 0) return { ok: false, isEmpty: true };
+        v = v[0];
+    }
+    if (v !== null && typeof v === 'object' && 'value' in v) {
+        v = v.value;
+    }
+    if (v === null || v === undefined) return { ok: false, isEmpty: true };
+
+    if (typeof v === 'number') {
+        return isNaN(v)
+            ? { ok: false, isEmpty: false, raw: String(raw) }
+            : { ok: true, value: v };
+    }
+
+    if (typeof v === 'object') {
+        return { ok: false, isEmpty: false, raw: `<${Object.keys(v).join(',') || 'object'}>` };
+    }
+
+    const str = String(v).trim();
+    if (str === '') return { ok: false, isEmpty: true };
+    const normalised = str.indexOf(',') === str.lastIndexOf(',')
+        ? str.replace(',', '.')
+        : str;
+    if (!/^-?\d+(\.\d+)?$/.test(normalised)) {
+        return { ok: false, isEmpty: false, raw: str };
+    }
+    return { ok: true, value: Number(normalised) };
+}
+
+/**
+ * Converts a single Airtable record to a GeoJSON Feature.
+ * Returns null when the row has no geometry and no address for server-side
+ * geocoding — the caller filters these out so the prune phase deletes any
+ * previously synced feature for that record.
+ * If `skipped` is provided, the skipped record id is pushed to it.
+ */
+export function recordToFeature(record, fieldMapping, skipped = null) {
     const { locationMode, fields } = fieldMapping;
     let geometry = null;
 
     if (!locationMode || locationMode === 'dual') {
-        // Existing behavior - backward compat
         const { latField, lngField } = fieldMapping;
         if (latField && lngField) {
-            const lat = parseFloat(getCellValue(record, latField));
-            const lng = parseFloat(getCellValue(record, lngField));
-            if (!isNaN(lat) && !isNaN(lng)) {
-                geometry = { type: 'Point', coordinates: [lng, lat] };
+            const latParsed = parseCoordinate(getCellValue(record, latField));
+            const lngParsed = parseCoordinate(getCellValue(record, lngField));
+            if (latParsed.ok && lngParsed.ok) {
+                geometry = { type: 'Point', coordinates: [lngParsed.value, latParsed.value] };
+            } else if (!latParsed.isEmpty || !lngParsed.isEmpty) {
+                const latShow = latParsed.isEmpty ? '(empty)' : latParsed.raw;
+                const lngShow = lngParsed.isEmpty ? '(empty)' : lngParsed.raw;
+                // eslint-disable-next-line no-console
+                console.warn(`[Mapsemble] Could not parse coordinates for record ${record.id} (lat: ${latShow}, lng: ${lngShow})`);
             }
         }
     } else if (locationMode === 'single') {
@@ -122,11 +171,11 @@ export function recordToFeature(record, fieldMapping) {
             }
         }
     }
-    // locationMode === 'address': geometry stays null
 
     const properties = {
         _airtable_id: record.id,
     };
+    let hasAddressForGeocoding = false;
 
     // Include address value for geocoding
     if (locationMode === 'single' && fieldMapping.locationFormat === 'address' && fieldMapping.locationColumn) {
@@ -134,7 +183,13 @@ export function recordToFeature(record, fieldMapping) {
         if (addressValue) {
             const addrSlug = toSlug(fieldMapping.locationColumnName || 'address');
             properties[addrSlug] = String(addressValue);
+            hasAddressForGeocoding = true;
         }
+    }
+
+    if (geometry === null && !hasAddressForGeocoding) {
+        if (skipped) skipped.push({ recordId: record.id });
+        return null;
     }
 
     if (fields) {
@@ -166,9 +221,9 @@ export function recordToFeature(record, fieldMapping) {
 /**
  * Converts an array of Airtable records to a GeoJSON FeatureCollection.
  */
-export function recordsToFeatureCollection(records, fieldMapping) {
+export function recordsToFeatureCollection(records, fieldMapping, skipped = null) {
     const features = records
-        .map(record => recordToFeature(record, fieldMapping))
+        .map(record => recordToFeature(record, fieldMapping, skipped))
         .filter(f => f !== null && f !== undefined);
 
     return {
