@@ -186,7 +186,9 @@ export async function createMap(payload, config, setToken) {
 }
 
 /**
- * Sync a batch of GeoJSON features to a map.
+ * Sync a batch of GeoJSON features to a map (upsert by remote ID).
+ * Uses PATCH so existing features matched by _airtable_id are updated and
+ * new ones are created. POST would reject duplicates.
  * features: array of GeoJSON Feature objects with _airtable_id in properties.
  * Returns the API response body.
  */
@@ -199,7 +201,7 @@ export async function syncFeatures(mapId, features, config, setToken) {
     const res = await apiFetch(
         `/api/v1/maps/${mapId}/features`,
         {
-            method: 'POST',
+            method: 'PATCH',
             body: JSON.stringify(requestBody),
         },
         config,

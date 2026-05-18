@@ -177,12 +177,27 @@ function SyncPanelInner({ table, tableId, mapId, onBack, onNext, showHeader, ski
             const batch = features.slice(i, i + dynamicBatchSize);
             try {
                 const result = await syncFeatures(mapId, batch, config, setToken);
-                const limitFail = (result?.failed || []).find(
+                const failed = result?.failed || [];
+                const limitFail = failed.find(
                     f => f.code === 'location_limit_reached'
                 );
                 if (limitFail) {
                     limitReached = true;
                     setLimitInfo({ limit: limitFail.limit, current: limitFail.current, totalRecords: total });
+                }
+                const otherFailures = failed.filter(f => f.code !== 'location_limit_reached');
+                if (otherFailures.length > 0) {
+                    const grouped = otherFailures.reduce((acc, f) => {
+                        const msg = f.message || 'Unknown error';
+                        acc[msg] = (acc[msg] || 0) + 1;
+                        return acc;
+                    }, {});
+                    const batchLabel = `records ${i + 1}–${Math.min(i + dynamicBatchSize, total)}`;
+                    Object.entries(grouped).forEach(([msg, count]) => {
+                        addError(`Batch (${batchLabel}): ${count} record${count !== 1 ? 's' : ''} failed - ${msg}`);
+                    });
+                    upsertHadErrors = true;
+                    hadAnyError = true;
                 }
                 i += dynamicBatchSize;
             } catch (err) {

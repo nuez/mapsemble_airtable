@@ -1,5 +1,4 @@
 {
-    "name": "mapsemble-airtable",
     "scripts": {
         "lint": "ESLINT_USE_FLAT_CONFIG=false eslint frontend"
     },
